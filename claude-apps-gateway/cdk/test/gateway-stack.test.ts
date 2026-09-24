@@ -234,3 +234,54 @@ describe('gatewayName parameterization (must match setup.sh PROJECT / deploy.sh 
     t.hasResourceProperties('AWS::ECR::Repository', { RepositoryName: 'claude-gateway' });
   });
 });
+
+describe('adminReady gate (WIP admin app, default off)', () => {
+  test('default (adminReady omitted) creates NO admin resources', () => {
+    // PASS2 leaves adminReady unset → default false. The admin app is a WIP that
+    // shares the gateway imageTag; with no admin image its rollback circuit breaker
+    // would fail the whole stack update, so it must be fully absent by default.
+    const t = synth(PASS2);
+    // Only the gateway repo, not the admin repo.
+    t.resourceCountIs('AWS::ECR::Repository', 1);
+    t.hasResourceProperties('AWS::ECR::Repository', { RepositoryName: 'claude-gateway' });
+    // Only the gateway service; no admin service.
+    t.resourceCountIs('AWS::ECS::Service', 1);
+    // No admin log group.
+    const adminLogGroups = t.findResources('AWS::Logs::LogGroup', {
+      Properties: { LogGroupName: '/claude-gateway/admin' },
+    });
+    expect(Object.keys(adminLogGroups)).toHaveLength(0);
+    // Only the :443 listener; no :3000 admin listener.
+    const port3000 = t.findResources('AWS::ElasticLoadBalancingV2::Listener', {
+      Properties: { Port: 3000 },
+    });
+    expect(Object.keys(port3000)).toHaveLength(0);
+    // No AdminUrl / AdminEcrRepositoryUri outputs.
+    expect(t.findOutputs('AdminUrl')).toEqual({});
+    expect(t.findOutputs('AdminEcrRepositoryUri')).toEqual({});
+  });
+
+  test('adminReady: true creates the admin repo, service, log group, and :3000 listener', () => {
+    const t = synth({ ...PASS2, adminReady: true });
+    // Gateway repo + admin repo.
+    t.resourceCountIs('AWS::ECR::Repository', 2);
+    t.hasResourceProperties('AWS::ECR::Repository', { RepositoryName: 'claude-gateway-admin' });
+    // Gateway service + admin service.
+    t.resourceCountIs('AWS::ECS::Service', 2);
+    t.hasResourceProperties('AWS::ECS::Service', { ServiceName: 'claude-gateway-admin' });
+    // Admin log group present.
+    t.hasResourceProperties('AWS::Logs::LogGroup', { LogGroupName: '/claude-gateway/admin' });
+    // :3000 admin listener present.
+    t.hasResourceProperties('AWS::ElasticLoadBalancingV2::Listener', { Port: 3000 });
+    // Admin outputs present.
+    t.hasOutput('AdminUrl', {});
+    t.hasOutput('AdminEcrRepositoryUri', {});
+  });
+
+  test('adminReady: true in pass 1 still creates only the two ECR repos, no service', () => {
+    // Pass 1 returns after the repos; admin repo should be pushable then too.
+    const t = synth({ env: PASS2.env, imageReady: false, imageTag: '2.1.274', adminReady: true });
+    t.resourceCountIs('AWS::ECR::Repository', 2);
+    t.resourceCountIs('AWS::ECS::Service', 0);
+  });
+});

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib';
 import { GatewayStack } from '../lib/claude-gateway-stack';
+import { DbStack } from '../lib/db-stack';
 
 /**
  * CDK entry point for the Claude apps gateway on ECS Fargate (Bedrock upstream).
@@ -31,6 +32,10 @@ import { GatewayStack } from '../lib/claude-gateway-stack';
  *     createVpcEndpoints  "false" to skip VPC endpoint creation when reusing a VPC
  *                     (`vpcId`) that already has them; default true (optional)
  *     imageReady      "false" for pass 1 (repo only), "true"/unset for pass 2
+ *     adminReady      "true" to deploy the WIP admin app (repo + service + :3000
+ *                     listener); default false. Needs a pushed ${gatewayName}-admin
+ *                     image at imageTag that passes /healthz, else its rollback
+ *                     circuit breaker fails the whole stack update.
  *   BUILD-TIME (stamped into the image by stamp-config.sh; shown here for parity,
  *   not passed to the running task — changing them means a new image, by design):
  *     claudeVersion   default 2.1.274
@@ -47,6 +52,35 @@ const region = ctx('region') ?? process.env.CDK_DEFAULT_REGION ?? 'us-east-1';
 const bedrockRegion = ctx('bedrockRegion') ?? region;
 const claudeVersion = ctx('claudeVersion') ?? '2.1.274';
 
+// Database source (create-if-absent / reference-if-provided). If dbEndpoint is
+// given, that INDEPENDENT database is referenced as-is (owned by neither stack).
+// Otherwise the companion ClaudeGatewayDbStack creates + owns the DB and its outputs
+// are passed into the gateway. The gateway stack NEVER owns an RDS resource.
+const dbEndpointCtx = ctx('dbEndpoint');
+const vpcId = ctx('vpcId');
+let dbEndpoint = dbEndpointCtx;
+let dbSecretArn = ctx('dbSecretArn');
+let dbSecurityGroupId = ctx('dbSecurityGroupId');
+let dbName = ctx('dbName');
+
+if (!dbEndpoint) {
+  const dbStack = new DbStack(app, 'ClaudeGatewayDbStack', {
+    env: { account: process.env.CDK_DEFAULT_ACCOUNT, region },
+    description: 'Claude apps gateway database (separate lifecycle from the gateway stack)',
+    vpcId,
+    dbName,
+  });
+  dbEndpoint = dbStack.dbEndpoint;
+  dbSecretArn = dbStack.dbSecretArn;
+  // Import the DB SG id by STABLE export name rather than the live cross-stack
+  // token (dbStack.dbSecurityGroupId). Passing the token makes CDK synthesize a
+  // usage-derived auto-export that it may try to prune while the gateway still
+  // imports it -> "Cannot delete export ... in use" deadlock. A fixed-name
+  // Fn.importValue is constant across synths, so the export is never pruned.
+  dbSecurityGroupId = cdk.Fn.importValue(DbStack.SG_EXPORT_NAME);
+  dbName = dbStack.dbName;
+}
+
 new GatewayStack(app, 'ClaudeGatewayStack', {
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region },
   description: 'Claude apps gateway on ECS Fargate with Amazon Bedrock (worked example)',
@@ -58,12 +92,20 @@ new GatewayStack(app, 'ClaudeGatewayStack', {
   zoneName: ctx('zoneName'),
   zoneId: ctx('zoneId'),
   ingressCidr: ctx('ingressCidr'),
-  vpcId: ctx('vpcId'),
+  vpcId,
+  albSubnetIds: ctx('albSubnetIds'),
+  dbEndpoint,
+  dbSecretArn,
+  dbSecurityGroupId,
+  dbName,
   // Default true; only 'false' opts out (for a reused VPC that already has endpoints).
   createVpcEndpoints: ctx('createVpcEndpoints') !== 'false',
   // Pass 1 sets imageReady=false to create just the ECR repo; pass 2 (default)
   // deploys the full stack including the Fargate service.
   imageReady: ctx('imageReady') !== 'false',
+  // Admin app is WIP; default OFF. Only 'true' opts in (needs a pushed
+  // ${gatewayName}-admin image at imageTag that passes /healthz).
+  adminReady: ctx('adminReady') === 'true',
 });
 
 app.synth();

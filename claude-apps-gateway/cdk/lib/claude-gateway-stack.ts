@@ -4,7 +4,6 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as ecsPatterns from 'aws-cdk-lib/aws-ecs-patterns';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
-import * as rds from 'aws-cdk-lib/aws-rds';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -38,6 +37,29 @@ export interface GatewayStackProps extends cdk.StackProps {
    */
   readonly createVpcEndpoints?: boolean;
   /**
+   * When reusing a VPC (`vpcId`), the explicit subnets for the internal ALB and
+   * Fargate tasks, as a comma-separated list of `subnetId:availabilityZone:routeTableId`
+   * (e.g. `subnet-aaa:ap-south-1a:rtb-xxx,subnet-bbb:ap-south-1b:rtb-xxx`). Use this
+   * when the reused VPC has more than one subnet in the same AZ (an ALB rejects two
+   * subnets in one AZ) — pick exactly one subnet per AZ across >=2 AZs. Ignored for a
+   * fresh CDK-created VPC (which already has one subnet per AZ per tier).
+   */
+  readonly albSubnetIds?: string;
+  /**
+   * Database wiring. The gateway NEVER owns an RDS resource; it always REFERENCES a
+   * database by these values. When deploying via bin/app.ts with no DB_ENDPOINT, the
+   * companion ClaudeGatewayDbStack creates the DB and passes its outputs here; when
+   * DB_ENDPOINT is provided, that independent DB is referenced as-is (owned by neither
+   * stack, untouched by deploys). All four are required for a pass-2 (service) deploy.
+   */
+  readonly dbEndpoint?: string;
+  /** Secrets Manager ARN of the DB credentials secret (username/password JSON). */
+  readonly dbSecretArn?: string;
+  /** Security group id of the referenced DB, granted 5432 ingress from the task SG. */
+  readonly dbSecurityGroupId?: string;
+  /** Database name (default 'claude_gateway'). */
+  readonly dbName?: string;
+  /**
    * Name prefix for the stack's named resources (ECR repo, cluster, service,
    * secrets, log group). Mirrors setup.sh's PROJECT. Defaults to 'claude-gateway'.
    * deploy.sh passes this through from the .env GATEWAY_NAME.
@@ -52,9 +74,17 @@ export interface GatewayStackProps extends cdk.StackProps {
   readonly bedrockRegion?: string;
   /** false = pass 1 (ECR repo only); true = pass 2 (full stack incl. service). */
   readonly imageReady: boolean;
+  /**
+   * Gate the admin web app (its ECR repo, Fargate service, ALB :3000 listener,
+   * log group, and security-group rules). Defaults to false because the admin
+   * app is a WORK IN PROGRESS: it shares the gateway's imageTag, so with no
+   * admin image pushed the admin task can't pull an image, and its
+   * circuitBreaker:{rollback:true} then rolls back the WHOLE stack update.
+   * Leave false to deploy the gateway alone; set true once a matching
+   * `${gatewayName}-admin` image exists at imageTag and passes /healthz.
+   */
+  readonly adminReady?: boolean;
 }
-
-const DB_NAME = 'claude_gateway';
 
 /**
  * The same Fargate deployment setup.sh provisions, expressed in CDK L2 constructs.
@@ -70,6 +100,11 @@ export class GatewayStack extends cdk.Stack {
     // Region of the Bedrock endpoint; defaults to the deploy region. The gateway
     // uses global.anthropic.* inference profiles, which resolve from any region.
     const bedrockRegion = props.bedrockRegion ?? this.region;
+    // Admin app is a WORK IN PROGRESS; default OFF. When false, none of the admin
+    // resources (repo, service, listener, log group, SG rules) are created, so the
+    // untested admin container can't trip its rollback circuit breaker and fail the
+    // whole stack update. Flip to true once a matching admin image exists.
+    const adminReady = props.adminReady ?? false;
 
     // ── ECR repository (the pass-1 target) ────────────────────────────────────
     // Created first so the image can be built+pushed before the service exists.
@@ -82,6 +117,22 @@ export class GatewayStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'EcrRepositoryUri', { value: repo.repositoryUri });
+
+    // ── ECR repository for the admin web app (only when adminReady) ───────────
+    // Gated so the WIP admin app is fully absent until opted in. Created in both
+    // passes (like the gateway repo) so its image can be pushed during pass 1.
+    const adminRepo = adminReady
+      ? new ecr.Repository(this, 'AdminRepo', {
+          repositoryName: `${gatewayName}-admin`,
+          imageScanOnPush: true,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+          emptyOnDelete: true,
+        })
+      : undefined;
+
+    if (adminRepo) {
+      new cdk.CfnOutput(this, 'AdminEcrRepositoryUri', { value: adminRepo.repositoryUri });
+    }
 
     // Pass 1 stops here: create just the repo, then build+push the image.
     if (!props.imageReady) {
@@ -133,6 +184,25 @@ export class GatewayStack extends cdk.Stack {
           ],
         });
 
+    // When reusing an existing VPC (`vpcId`), that VPC may have MORE THAN ONE
+    // private-with-egress subnet in the same Availability Zone (common in default
+    // VPCs). An ALB rejects being attached to two subnets in the same AZ, so the
+    // caller passes `albSubnetIds` — one subnet per AZ across >=2 AZs — as
+    // `subnetId:az:routeTableId` entries, reused for both the tasks and the internal
+    // ALB. For a fresh CDK-created VPC we fall back to the built-in private tier.
+    const appSubnets: ec2.SubnetSelection = props.albSubnetIds
+      ? {
+          subnets: props.albSubnetIds.split(',').map((entry, i) => {
+            const [subnetId, availabilityZone, routeTableId] = entry.split(':').map((s) => s.trim());
+            return ec2.Subnet.fromSubnetAttributes(this, `GwSubnet${i}`, {
+              subnetId,
+              availabilityZone,
+              routeTableId,
+            });
+          }),
+        }
+      : { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS };
+
     // ── Interface VPC endpoints (AWS backbone, no internet) + S3 gateway ──────
     // Always created for a fresh VPC. When reusing a VPC (`vpcId`), set
     // `createVpcEndpoints=false` IF that VPC already has these endpoints —
@@ -175,27 +245,21 @@ export class GatewayStack extends cdk.Stack {
     // Example posture: easy teardown. See README "Productionising" to harden
     // (deletion protection, multi-AZ, longer backups, RETAIN) the moment you
     // enable spend limits, because then Postgres holds durable spend + PII.
-    const db = new rds.DatabaseInstance(this, 'Db', {
-      engine: rds.DatabaseInstanceEngine.postgres({ version: rds.PostgresEngineVersion.VER_16 }),
-      vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.BURSTABLE4_GRAVITON, ec2.InstanceSize.MICRO),
-      databaseName: DB_NAME,
-      // RDS-managed master secret (JSON username/password). Gateway connects as
-      // the master user, which has CREATE TABLE for the boot migrations.
-      credentials: rds.Credentials.fromGeneratedSecret('gateway'),
-      allocatedStorage: 20,
-      storageType: rds.StorageType.GP3,
-      storageEncrypted: true,
-      multiAz: false,
-      publiclyAccessible: false,
-      backupRetention: cdk.Duration.days(1),
-      deletionProtection: false,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    // The gateway NEVER creates an RDS instance — it REFERENCES a database provided
+    // via props (either the companion ClaudeGatewayDbStack's outputs, or an
+    // independent DB passed through DB_ENDPOINT). This decouples the DB lifecycle
+    // from gateway redeploys entirely.
+    const dbEndpoint = req(props.dbEndpoint, 'dbEndpoint');
+    const dbSecretArn = req(props.dbSecretArn, 'dbSecretArn');
+    const dbSecurityGroupId = req(props.dbSecurityGroupId, 'dbSecurityGroupId');
+    const dbHost = dbEndpoint;
+    const dbSecret = secretsmanager.Secret.fromSecretCompleteArn(this, 'DbSecret', dbSecretArn);
+    // Grant the gateway task SG ingress to the referenced DB's SG on 5432 (from the
+    // gateway side, so there is no cross-stack circular dependency).
+    const dbSg = ec2.SecurityGroup.fromSecurityGroupId(this, 'DbSg', dbSecurityGroupId, {
+      mutable: true,
     });
-    const dbSecret = db.secret!;
-    // RDS SG: 5432 from the task SG ONLY (never a CIDR).
-    db.connections.allowFrom(taskSg, ec2.Port.tcp(5432), 'gateway tasks to RDS');
+    dbSg.addIngressRule(taskSg, ec2.Port.tcp(5432), 'gateway tasks to referenced RDS');
 
     // ── Gateway-owned secrets (DB creds come from the RDS-managed secret) ─────
     const jwtSecret = new secretsmanager.Secret(this, 'JwtSecret', {
@@ -283,6 +347,20 @@ export class GatewayStack extends cdk.Stack {
     // IPv4-only on purpose: internal dual-stack ALBs return public-range AAAA
     // records that /login rejects.
     const image = ecs.ContainerImage.fromEcrRepository(repo, props.imageTag);
+
+    // Build the internal ALB EXPLICITLY so we control its subnets. The
+    // ApplicationLoadBalancedFargateService pattern otherwise picks ALB subnets
+    // from the VPC's default selection (ALL matching subnets), which fails in a
+    // reused VPC that has >1 subnet in the same AZ ("a load balancer cannot be
+    // attached to multiple subnets in the same Availability Zone"). taskSubnets
+    // constrains only the tasks, NOT the ALB — so the LB subnets must be pinned here.
+    const gatewayAlb = new elbv2.ApplicationLoadBalancer(this, 'GatewayAlb', {
+      vpc,
+      internetFacing: false, // internal → private IPs only (satisfies /login)
+      ipAddressType: elbv2.IpAddressType.IPV4,
+      vpcSubnets: appSubnets, // one subnet per AZ across >=2 AZs
+    });
+
     const fargate = new ecsPatterns.ApplicationLoadBalancedFargateService(this, 'Gateway', {
       cluster,
       serviceName: gatewayName,
@@ -291,10 +369,9 @@ export class GatewayStack extends cdk.Stack {
       desiredCount: 2, // zero-downtime rolling deploys + AZ resilience; Postgres is the shared layer
       minHealthyPercent: 100, // keep all replicas up during a rolling deploy (the gateway is stateless)
       circuitBreaker: { rollback: true }, // fail a bad deploy fast and roll back instead of hanging for hours
-      publicLoadBalancer: false, // internal ALB → private IPs only (satisfies /login)
-      ipAddressType: elbv2.IpAddressType.IPV4,
+      loadBalancer: gatewayAlb, // explicit internal ALB pinned to appSubnets (above)
       openListener: false, // don't open 443 to 0.0.0.0/0; we restrict to ingressCidr below
-      taskSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      taskSubnets: appSubnets,
       securityGroups: [taskSg],
       protocol: elbv2.ApplicationProtocol.HTTPS,
       certificate,
@@ -314,7 +391,7 @@ export class GatewayStack extends cdk.Stack {
         environment: {
           CLAUDE_GATEWAY_LOG_LEVEL: 'info',
           CLAUDE_CONFIG_DIR: '/tmp/.claude',
-          DB_HOST: db.dbInstanceEndpointAddress,
+          DB_HOST: dbHost,
           CLAUDE_GATEWAY_ALLOW_LOOPBACK: '1', // ADOT sidecar is on localhost
         },
         secrets: {
@@ -396,6 +473,107 @@ export class GatewayStack extends cdk.Stack {
       healthyHttpCodes: '200',
     });
 
+    // ── Admin web app: React SPA behind nginx (port 3000 on the same ALB) ────
+    // A lightweight dashboard for gateway admin operations (spend limits, users,
+    // audit). Authenticates via the gateway's device-auth flow. nginx proxies
+    // /v1, /oauth, /.well-known to the gateway ALB and serves the SPA on /.
+    //
+    // GATED on adminReady (default false): the admin app is a WIP that shares the
+    // gateway's imageTag. With no admin image pushed, the task can't pull an image
+    // and its circuitBreaker:{rollback:true} rolls back the WHOLE stack update.
+    // Keeping it off entirely until opted in lets the gateway deploy cleanly.
+    if (adminReady) {
+      // adminRepo is guaranteed defined here: both are gated on the same flag.
+      const adminSg = new ec2.SecurityGroup(this, 'AdminSg', {
+        vpc,
+        description: 'Admin tasks: 3000 from the ALB only',
+        allowAllOutbound: true,
+      });
+
+      const adminLogGroup = new logs.LogGroup(this, 'AdminLogGroup', {
+        logGroupName: `/${gatewayName}/admin`,
+        retention: logs.RetentionDays.THREE_MONTHS,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      });
+
+      const adminTaskDef = new ecs.FargateTaskDefinition(this, 'AdminTaskDef', {
+        cpu: 256,
+        memoryLimitMiB: 512,
+      });
+
+      adminTaskDef.addContainer('admin', {
+        image: ecs.ContainerImage.fromEcrRepository(adminRepo!, props.imageTag),
+        logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'admin', logGroup: adminLogGroup }),
+        portMappings: [{ containerPort: 3000 }],
+        environment: {
+          // The ALB DNS name so nginx can proxy API calls to the gateway.
+          GATEWAY_HOST: fargate.loadBalancer.loadBalancerDnsName,
+        },
+      });
+
+      const adminService = new ecs.FargateService(this, 'AdminService', {
+        cluster,
+        serviceName: `${gatewayName}-admin`,
+        taskDefinition: adminTaskDef,
+        desiredCount: 1,
+        securityGroups: [adminSg],
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        assignPublicIp: false,
+        circuitBreaker: { rollback: true },
+        minHealthyPercent: 0, // single task, allow replacement
+      });
+
+      // Admin listener on port 3000 (HTTPS, same cert as :443).
+      const adminListener = fargate.loadBalancer.addListener('AdminListener', {
+        port: 3000,
+        protocol: elbv2.ApplicationProtocol.HTTPS,
+        certificates: [certificate],
+        sslPolicy: elbv2.SslPolicy.TLS13_RES,
+      });
+
+      adminListener.addTargets('AdminTargets', {
+        port: 3000,
+        protocol: elbv2.ApplicationProtocol.HTTP,
+        targets: [adminService],
+        healthCheck: {
+          path: '/healthz',
+          healthyHttpCodes: '200',
+          interval: cdk.Duration.seconds(30),
+        },
+        deregistrationDelay: cdk.Duration.seconds(10),
+      });
+
+      // Allow ingressCidr → ALB on port 3000 (admin dashboard).
+      fargate.loadBalancer.connections.allowFrom(
+        ec2.Peer.ipv4(ingressCidr),
+        ec2.Port.tcp(3000),
+        'admins to ALB (admin dashboard)',
+      );
+
+      // Allow ALB → admin tasks on port 3000.
+      adminSg.addIngressRule(
+        fargate.loadBalancer.connections.securityGroups[0],
+        ec2.Port.tcp(3000),
+        'ALB to admin tasks',
+      );
+
+      // Allow the admin container → gateway ALB on 443. The admin nginx proxies
+      // /oauth, /v1, /.well-known to the gateway (GATEWAY_HOST = the ALB DNS);
+      // without this the admin task's traffic hits the ALB's 443 listener whose
+      // SG only admits ingressCidr, so the proxy times out with a 504 at login.
+      fargate.loadBalancer.connections.allowFrom(
+        adminSg,
+        ec2.Port.tcp(443),
+        'admin container to gateway ALB (API proxy)',
+      );
+
+      // Admin dashboard URL (port 3000 on the same ALB).
+      new cdk.CfnOutput(this, 'AdminUrl', {
+        value: `https://${recordHost}:3000`,
+        description: 'Admin dashboard URL (port 3000 on the same ALB)',
+      });
+    }
+
     // ── Outputs ───────────────────────────────────────────────────────────────
     new cdk.CfnOutput(this, 'AlbDnsName', { value: fargate.loadBalancer.loadBalancerDnsName });
     new cdk.CfnOutput(this, 'PublicUrl', { value: publicUrl });
@@ -404,7 +582,7 @@ export class GatewayStack extends cdk.Stack {
       description: 'Register this redirect URI on your OIDC client',
     });
     new cdk.CfnOutput(this, 'TaskRoleArn', { value: taskRole.roleArn });
-    new cdk.CfnOutput(this, 'RdsEndpoint', { value: db.dbInstanceEndpointAddress });
+    new cdk.CfnOutput(this, 'RdsEndpoint', { value: dbHost });
     new cdk.CfnOutput(this, 'CertFingerprintHint', {
       value: `openssl s_client -connect ${recordHost}:443 -servername ${recordHost} | openssl x509 -noout -fingerprint -sha256`,
       description: 'Run this to get the cert SHA-256 to publish to developers (the CLI pins it)',

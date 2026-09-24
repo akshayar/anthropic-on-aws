@@ -46,6 +46,15 @@ cdk-nag-output.txt
 **/test/
 !claude-code-on-lambda-microvm/**/test/
 !claude-code-on-lambda-microvm/**/test/**
+# The Claude Apps Gateway CDK app keeps its TypeScript SOURCE in bin/ lib/ test/
+# (not build output), so the generic **/bin/ **/lib/ **/test/ rules above must not
+# swallow it. Un-ignore those source dirs explicitly.
+!claude-apps-gateway/cdk/bin/
+!claude-apps-gateway/cdk/bin/**
+!claude-apps-gateway/cdk/lib/
+!claude-apps-gateway/cdk/lib/**
+!claude-apps-gateway/cdk/test/
+!claude-apps-gateway/cdk/test/**
 **/.next/
 **/__pycache__/
 mkdocs-env/*

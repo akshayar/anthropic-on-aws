@@ -44,6 +44,9 @@ oidc:
   client_id: @@OIDC_CLIENT_ID@@
   client_secret: ${OIDC_CLIENT_SECRET}   # the one secret in this block (env-injected)
   allowed_email_domains: [@@ALLOWED_EMAIL_DOMAINS@@]
+  # Amazon Cognito emits group membership in the `cognito:groups` claim; the
+  # gateway matches admin_groups (and any group-scoped policy) against this claim.
+  groups_claim: cognito:groups
   # Cognito does not support offline_access; override default scopes here.
   # scopes: [openid, email, profile]
   # Per-IdP notes — uncomment what your provider needs:
@@ -149,33 +152,31 @@ telemetry:
 auto_include_builtin_models: false
 managed:
   policies:
-    # Example group-scoped policy (uncomment + adapt). Specific matches first;
-    # they inherit any key they don't set from the match:{} base below.
-    # - match: { groups: [eng-contractors] }
-    #   cli:
-    #     availableModels: [claude-haiku-4-5]
-    #     enforceAvailableModels: true
-    #     permissions: { allow: [Read, Grep] }
-    #   # Claude Desktop feature gates (see the desktop: note on the base policy below).
-    #   desktop:
-    #     isLocalDevMcpEnabled: false
-    #     disableAutoUpdates: true
-    #     # `enabled: true` is REQUIRED — Desktop's banner.enabled has no default, so a
-    #     # banner with only `text:` renders nothing.
-    #     banner: { enabled: true, text: "Contractor build: internal use only" }
-    # Per-team cost attribution: OTEL_RESOURCE_ATTRIBUTES is stamped on every
-    # OTLP export, so CloudWatch's PromQL layer can group spend/usage by team
-    # (sum by ("@resource.team.id") (...)) same as user.id/user.email already are.
-    # - match: { groups: [team-platform] }
-    #   cli:
-    #     env:
-    #       OTEL_RESOURCE_ATTRIBUTES: "team.id=platform,department=engineering,cost_center=cc-1001"
-    # Catch-all base: matches every authenticated user.
-    - match: {}
+    # Per-team model access (matched against Cognito's cognito:groups claim).
+    # Specific group matches come FIRST and win; they inherit any key they don't
+    # set from the match:{} base below. enforceAvailableModels is server-side at
+    # /v1/messages, so a patched client cannot request a model outside its team's list.
+    #
+    # Engineering: full model access (Opus + Sonnet + Haiku).
+    - match: { groups: [engineering] }
       cli:
         availableModels:
           - claude-opus-5
           - claude-sonnet-5
+          - claude-haiku-4-5
+        enforceAvailableModels: true
+    # Business: Sonnet + Haiku only (no Opus).
+    - match: { groups: [business] }
+      cli:
+        availableModels:
+          - claude-sonnet-5
+          - claude-haiku-4-5
+        enforceAvailableModels: true
+    # Catch-all base: every authenticated user in NEITHER group above.
+    # Least privilege — Haiku only.
+    - match: {}
+      cli:
+        availableModels:
           - claude-haiku-4-5
           # - claude-fable-5   # opt-in — see the models: block note below
         enforceAvailableModels: true
@@ -244,17 +245,12 @@ managed:
 
 # Optional blocks, left commented:
 #
-# admin:        # enables /v1/organizations/spend_limits + per-developer spend caps
-#   write_keys:
-#     - { id: terraform, key: "${GATEWAY_ADMIN_WRITE_KEY}" }
-#   read_keys:
-#     - { id: reporting, key: "${GATEWAY_ADMIN_READ_KEY}" }
-#   # Both optional: admin_groups lets members of an IdP group call the admin API
-#   # with their session bearer token instead of an x-api-key; blocked_message is
-#   # appended to the 429 a capped developer sees. The admin block is validated
-#   # STRICTLY — an unknown key here fails the boot.
-#   admin_groups: [platform-finops]
-#   blocked_message: "Contact platform-team@company.com to request a higher limit."
+admin:        # enables /v1/organizations/spend_limits + per-developer spend caps
+  # Bearer-token admin via Cognito group ONLY — NO x-api-key. Members of the
+  # gateway-admins Cognito group call the admin API with their SSO session token.
+  # (write_keys/read_keys deliberately omitted so there are no API keys to mint.)
+  admin_groups: [gateway-admins]
+  blocked_message: "Contact your platform admin to request a higher limit."
 #   # NOTE 1: enabling admin makes Postgres hold durable spend + audit + PII. Harden
 #   # RDS (backups, deletion protection, multi-AZ) — see the README "Productionising".
 #   # NOTE 2: uncommenting this is NOT sufficient on its own. The ${...} keys are

@@ -90,13 +90,26 @@ fi
 # also set CREATE_VPC_ENDPOINTS=false — the stack refuses to recreate them.
 [ -n "${VPC_ID:-}" ] && CDK_CTX+=(-c "vpcId=${VPC_ID}")
 [ -n "${CREATE_VPC_ENDPOINTS:-}" ] && CDK_CTX+=(-c "createVpcEndpoints=${CREATE_VPC_ENDPOINTS}")
+[ -n "${ALB_SUBNET_IDS:-}" ] && CDK_CTX+=(-c "albSubnetIds=${ALB_SUBNET_IDS}")
+# Database source: if DB_ENDPOINT is set, the gateway references that INDEPENDENT DB
+# (owned by neither stack) and ClaudeGatewayDbStack is NOT created. If unset, the
+# DbStack creates+owns the DB. The gateway stack never owns an RDS resource.
+[ -n "${DB_ENDPOINT:-}" ]  && CDK_CTX+=(-c "dbEndpoint=${DB_ENDPOINT}")
+[ -n "${DB_SECRET_ARN:-}" ] && CDK_CTX+=(-c "dbSecretArn=${DB_SECRET_ARN}")
+[ -n "${DB_SG_ID:-}" ]      && CDK_CTX+=(-c "dbSecurityGroupId=${DB_SG_ID}")
+[ -n "${DB_NAME:-}" ]       && CDK_CTX+=(-c "dbName=${DB_NAME}")
+# Optional: deploy the admin web app (WIP). ADMIN_READY=true in .env opts in — it
+# creates the claude-gateway-admin ECR repo (pass 1) and the AdminService (pass 2).
+# The admin image must be built+pushed BETWEEN the passes; build-admin-image.sh
+# does that (deploy-admin.sh orchestrates the full pass1 → build → pass2 flow).
+[ -n "${ADMIN_READY:-}" ] && CDK_CTX+=(-c "adminReady=${ADMIN_READY}")
 
 # --- Step 1: CDK pass 1 — ECR repository only ---
 # The ECS service can't start until its image exists, so the stack splits the
 # deploy in two: pass 1 creates just the ECR repo; we build+push; pass 2 (below)
 # brings up the full stack. See cdk/README.md "CDK context variables".
 echo "Step 1/5: Pass 1 — creating the ECR repository (CDK)..."
-npx cdk deploy --require-approval never -c imageReady=false "${CDK_CTX[@]}"
+npx cdk deploy --all --require-approval never -c imageReady=false "${CDK_CTX[@]}"
 echo "✅ ECR repository created"
 echo ""
 
@@ -227,7 +240,7 @@ echo ""
 # behind the internal ALB. cdk deploy blocks until the service is stable, so no
 # manual `update-service` scale-up is needed.
 echo "Step 4/5: Pass 2 — deploying the full stack (CDK)..."
-npx cdk deploy --require-approval never -c imageReady=true "${CDK_CTX[@]}"
+npx cdk deploy --all --require-approval never -c imageReady=true "${CDK_CTX[@]}"
 echo "✅ Full stack deployed"
 echo ""
 

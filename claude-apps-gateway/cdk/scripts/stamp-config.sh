@@ -56,6 +56,12 @@ domains_yaml="$(printf '%s' "${ALLOWED_EMAIL_DOMAINS}" | sed 's/[[:space:]]*,[[:
 if printf '%s' "${OIDC_ISSUER}" | grep -qiE '^https?://accounts\.google\.com/?$'; then
   google_block='  # Google Workspace: offline_access is rejected; refresh token comes\n  # from access_type=offline + prompt=consent (auto-stamped by stamp-config.sh).\n  scopes: [openid, profile, email]\n  extra_auth_params: { access_type: offline, prompt: consent }'
   echo "stamp-config: detected Google issuer — stamping Google scope block" >&2
+elif printf '%s' "${OIDC_ISSUER}" | grep -qiE 'cognito-idp\.[a-z0-9-]+\.amazonaws\.com'; then
+  # Amazon Cognito does not support the default `offline_access` scope and rejects
+  # it with invalid_scope. Drop it (openid/profile/email only); Cognito still
+  # issues a refresh token from the authorization_code grant without it.
+  google_block='  # Amazon Cognito: offline_access is rejected; use standard scopes only\n  # (auto-stamped by stamp-config.sh).\n  scopes: [openid, profile, email]'
+  echo "stamp-config: detected Cognito issuer — stamping Cognito scope block" >&2
 else
   google_block=''
 fi
