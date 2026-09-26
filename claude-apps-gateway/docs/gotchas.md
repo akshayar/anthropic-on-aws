@@ -494,3 +494,41 @@ For which keys are gated and from which release, read the
 [config reference](https://code.claude.com/docs/en/claude-apps-gateway-config) and the
 [changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md) — this example
 doesn't keep a second copy of Anthropic's version gates.
+
+## 21. Web search via AgentCore MCP — the OAuth chain, and no bootstrap server needed  **[hit live]**
+
+Delivering an AgentCore Gateway web-search target to Claude Desktop as a managed
+MCP server works **through the in-gateway `desktop.managedMcpServers` block alone**
+— the separate `-bootstrap` PKCE server is **not** required. The feared
+"cross-origin MCP URL gets dropped by the desktop block" does not apply on gateway
+2.1.274: Desktop received the cross-origin `*.gateway.bedrock-agentcore` URL, ran
+its own PKCE OAuth to Cognito, and connected. Only reach for `-bootstrap` if you
+actually hit that drop on some version, need no-redeploy live config edits, or need
+per-user bootstrap-fetch auth. Full recipe: [`deployment-websearch-mcp.md`](deployment-websearch-mcp.md).
+
+The auth chain has several non-obvious requirements, each of which failed loudly
+until fixed (all verified live 2026-09-26):
+
+- **Desktop sends the ACCESS token on the MCP call, not the id_token.** So the
+  AgentCore `customJWTAuthorizer` must validate **`allowedClients`** (matches the
+  access token's `client_id`), **NOT `allowedAudience`** — a Cognito access token
+  has no `aud` claim, so `allowedAudience` never matches and every call fails with
+  `Invalid Bearer token` (401).
+- **AgentCore validates the access token as a resource server** → a plain Cognito
+  token yields `insufficient_scope` (403). Create a Cognito **resource server +
+  custom scope** (e.g. `websearch-gw/invoke`), request it via the entry's
+  `oauth.scope`, and list it in the authorizer's **`allowedScopes`**.
+- **Use a PUBLIC Cognito client (no secret).** Desktop's PKCE flow sends no client
+  secret; a confidential/secret-bearing client fails the token exchange with
+  `invalid_client_secret` (400).
+- **Cognito matches `redirect_uri` EXACTLY, including the port.** Pin the entry's
+  `oauth.callbackHost`/`callbackPort` and register that exact
+  `http://127.0.0.1:PORT/callback` on the client — a random-port default gives
+  `redirect_mismatch`.
+- **Do NOT set `oauth.bearerTokenType`** — gateway 2.1.274 rejects it as an unknown
+  `desktop` sub-key and crash-loops the container at boot
+  (`managedMcpServers[0].oauth.bearerTokenType ignored: not a recognized sub-key`).
+- **Gateway-only redeploys:** `cdk deploy --all` deadlocks on the in-use
+  cross-stack DB export; deploy `ClaudeGatewayStack --exclusively` and keep
+  `-c adminReady=true` or the admin app (`:3000`) is torn down. And force an ECS
+  rollout — an unchanged `:latest` tag won't restart the tasks on its own.

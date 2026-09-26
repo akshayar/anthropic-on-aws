@@ -165,6 +165,59 @@ managed:
           - claude-sonnet-5
           - claude-haiku-4-5
         enforceAvailableModels: true
+      # Claude DESKTOP bootstrap opt-in for engineering. Presence of this `desktop`
+      # block makes /user/bootstrap SERVE this group's Desktop config (without it the
+      # endpoint 404s). All keys below are from Desktop's validated schema and are
+      # supported on gateway >= 2.1.232 (we run 2.1.274). Demo-visible governance:
+      # a managed banner + tab/feature gates prove central control of the GUI app.
+      desktop:
+        modelDiscoveryEnabled: false        # rely only on availableModels above
+        chatTabEnabled: true                # Chat tab hidden unless explicitly true (2.1.227+)
+        coworkTabEnabled: true
+        isClaudeCodeForDesktopEnabled: true
+        disabledBuiltinTools: [WebSearch]   # UNIONED with any permissions.deny (2.1.232+)
+        isDesktopExtensionSignatureRequired: true
+        isLocalDevMcpEnabled: false
+        banner: { enabled: true, text: "Engineering — Claude via internal gateway" }
+        # Web search delivered as a managed MCP server (Desktop takes an ARRAY,
+        # entries use `transport:` not `type:` — the CLI object form). Points at
+        # the AgentCore Gateway's MCP endpoint (JWT-gated on the Cognito client).
+        # Requires gateway >= 2.1.232 for managedMcpServers in a desktop block.
+        # The gateway does NOT support Dynamic Client Registration, so Desktop must
+        # be given a pre-configured OAuth client id (oauth.clientId) instead of
+        # auto-registering. clientId is the Cognito app-client the gateway's JWT
+        # authorizer accepts; authorizationServer is the Cognito issuer (OIDC
+        # discovery is fetched from it). See claude.com Desktop config reference,
+        # managedMcpServers[].oauth.
+        managedMcpServers:
+          - name: web-search
+            transport: http
+            url: https://web-search-noauth-ekqe2qxv5u.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp
+            oauth:
+              # Dedicated PUBLIC Cognito client (no secret) for Desktop's PKCE flow.
+              # The original client (1e2ugm77...) is CONFIDENTIAL (has a secret) and
+              # Cognito rejects Desktop's secretless token exchange with
+              # invalid_client_secret — hence a public client here.
+              clientId: e0h6vpqku8rehvufiv4r0mn80
+              authorizationServer:
+                - https://cognito-idp.ap-south-1.amazonaws.com/ap-south-1_lweAUOK9r
+              # AgentCore validates the ACCESS token as a resource server and returns
+              # insufficient_scope for a plain Cognito token. Request the custom
+              # resource-server scope (Cognito resource server 'websearch-gw', scope
+              # 'invoke') so the access token carries it and the gateway's
+              # allowedScopes match. openid keeps OIDC discovery working.
+              scope: openid websearch-gw/invoke
+              # NOTE: this gateway version (2.1.274) does NOT recognize
+              # oauth.bearerTokenType and FAILS BOOT if it is set. So Desktop sends
+              # the default id_token. For AgentCore to accept it, the gateway's JWT
+              # authorizer must validate allowedAudience (matches the id_token `aud`
+              # = client id), NOT allowedClients (which needs the access token's
+              # client_id claim). See the AgentCore authorizer config.
+              # Cognito matches the redirect_uri EXACTLY, including the port, so pin
+              # a fixed loopback callback instead of Desktop's default random port,
+              # and register http://127.0.0.1:8100/callback on the Cognito client.
+              callbackHost: 127.0.0.1
+              callbackPort: 8100
     # Business: Sonnet + Haiku only (no Opus).
     - match: { groups: [business] }
       cli:

@@ -96,8 +96,8 @@ current equivalents; names/paths drift as these samples evolve) before making an
   `deployment/infrastructure/*.yaml`, `source/go/cmd/credential-process/main.go` or
   `source/credential_provider/__main__.py`, `assets/docs/CLI_REFERENCE.md`
 - `claude-apps-gateway/README.md`, `CLAUDE.md`, `cdk/lib/claude-gateway-stack.ts`,
-  `cdk/bin/app.ts`, `docs/deployment.md`, `docs/gotchas.md`, `docs/teardown.md`,
-  `docs/connectivity.md`
+  `cdk/bin/app.ts`, `docs/deployment.md`, `docs/deployment-websearch-mcp.md`, `docs/gotchas.md`,
+  `docs/teardown.md`, `docs/connectivity.md`
 - `claude-apps-gateway-bootstrap/README.md`, `cdk/lib/bootstrap-stack.ts`, `.env.example`,
   `scripts/wire-client.sh`
 
@@ -133,6 +133,17 @@ this against the file cited" rather than as fact:
 The bootstrap add-on is optional and orthogonal to inference: it delivers *Desktop
 configuration* (models, MCP servers, egress rules) via its own PKCE client app, separate from
 the gateway's own SSO login for inference. A CLI-only fleet can skip it entirely.
+
+> **Verified 2026-09-26 — the bootstrap add-on is NOT required to deliver a managed MCP
+> server (e.g. web search via an AgentCore Gateway) to Desktop.** The in-gateway
+> `desktop.managedMcpServers` policy block delivers the (even cross-origin) MCP URL directly,
+> and Desktop runs its own PKCE OAuth against it — no `-bootstrap` Fargate service, no
+> `bootstrapUrl` plumbing. The earlier assumption that cross-origin MCP URLs get dropped and
+> need `-bootstrap` did not hold on gateway 2.1.274. The full working recipe (Cognito public
+> PKCE client, resource-server scope, `allowedClients`+`allowedScopes` on the AgentCore
+> authorizer, pinned loopback callback) and its caveats are in
+> `claude-apps-gateway/docs/deployment-websearch-mcp.md` and `docs/gotchas.md` §21. Reach for
+> `-bootstrap` only for no-redeploy live config edits or per-user bootstrap-fetch auth.
 
 ## Partial adoption is a valid outcome, not just binary cutover
 

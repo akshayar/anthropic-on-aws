@@ -287,6 +287,17 @@ gateway's host and port, so the ALB needs no extra listener rule. See the
 [config reference](https://code.claude.com/docs/en/claude-apps-gateway-config#claude-desktop-overlay)
 and the README's capability 2 for the `desktop:` feature gates.
 
+#### Web search (managed MCP via AgentCore Gateway)
+
+To give a group's Desktop users a web-search tool that Bedrock's built-in
+`WebSearch` can't provide (Bedrock 400s the Anthropic server-side tool), front an
+Amazon Bedrock **AgentCore Gateway** web-search target as a **managed MCP server**
+delivered through the policy's `desktop.managedMcpServers` block. The auth chain
+(Cognito public PKCE client + resource-server scope + `allowedClients`/`allowedScopes`
+on the AgentCore JWT authorizer + exact pinned loopback callback) has several
+non-obvious requirements — the full working recipe and the caveats learned deploying
+it are in [`deployment-websearch-mcp.md`](deployment-websearch-mcp.md).
+
 ## Telemetry
 
 `gateway.yaml`'s `telemetry.forward_to` sends OTLP metrics to an **ADOT collector
