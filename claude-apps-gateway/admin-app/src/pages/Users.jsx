@@ -9,13 +9,26 @@ export default function Users() {
   const [search, setSearch] = useState('')
   const [period, setPeriod] = useState('monthly')
   const [drilldown, setDrilldown] = useState(null) // { userId, email } | null
-  const [page, setPage] = useState(1)
-  const [hasMore, setHasMore] = useState(false)
+  // Cursor-based pagination. `/effective`'s `page` param is an OPAQUE TOKEN, not
+  // an integer (sending page=1 → 400 "invalid page token"). Page 1 sends NO token;
+  // each response carries a next-page token we pass back. `cursors` is the stack
+  // of tokens we've used, so Prev can walk back. cursors[0] === null (page 1).
+  const [cursors, setCursors] = useState([null])
+  const [nextCursor, setNextCursor] = useState(null)
   const PAGE_SIZE = 25
 
-  // Reload when period or page changes. Search is applied server-side via the
-  // `q` param on submit (which resets to page 1).
-  useEffect(() => { loadUsers() }, [period, page])
+  const pageNum = cursors.length            // 1-based page index for display
+  const currentCursor = cursors[cursors.length - 1]
+
+  // Reload when period or the active cursor changes.
+  useEffect(() => { loadUsers() }, [period, currentCursor])
+
+  // Pull the next-page token out of the response under whatever name the gateway
+  // uses. The param going back IN is `page`, so the token OUT is most likely
+  // `next_page`; fall back to other common cursor field names.
+  function extractNextToken(data) {
+    return data.next_page ?? data.next_page_token ?? data.next ?? data.last_id ?? null
+  }
 
   async function loadUsers() {
     setLoading(true)
@@ -24,19 +37,15 @@ export default function Users() {
         period,
         sort: 'spend_desc',
         limit: PAGE_SIZE,
-        page,
+        page: currentCursor || undefined,   // omit on page 1 (null)
         q: search || undefined,
       })
-      // Filter to selected period only (API may return multiple)
       const filtered = (data.data || []).filter(r => r.period === period)
       setUsers(filtered)
-      // Detect whether another page exists. Prefer an explicit signal from the
-      // API (has_more / last_id, the cursor shape the list endpoint returns);
-      // otherwise fall back to "a full page came back, so assume there's more".
-      const explicit = typeof data.has_more === 'boolean'
-        ? data.has_more
-        : (data.last_id != null && data.last_id !== data.first_id)
-      setHasMore(explicit || (data.data || []).length >= PAGE_SIZE)
+      // has_more, when present, is authoritative for whether a Next exists.
+      const token = extractNextToken(data)
+      const more = typeof data.has_more === 'boolean' ? data.has_more : !!token
+      setNextCursor(more ? token : null)
       setError(null)
     } catch (e) {
       setError(e.message)
@@ -44,11 +53,25 @@ export default function Users() {
     setLoading(false)
   }
 
+  function resetPaging() {
+    setNextCursor(null)
+    setCursors([null])
+  }
+
+  function goNext() {
+    if (nextCursor == null) return
+    setCursors(cs => [...cs, nextCursor])   // triggers reload via currentCursor
+  }
+
+  function goPrev() {
+    setCursors(cs => (cs.length > 1 ? cs.slice(0, -1) : cs))
+  }
+
   function handleSearch(e) {
     e.preventDefault()
-    // New search starts at page 1. If already on page 1, the effect won't fire,
-    // so call loadUsers directly to run the query.
-    if (page !== 1) setPage(1)
+    // New search: back to page 1. If already there, run the query directly
+    // (the effect won't fire because currentCursor is unchanged).
+    if (cursors.length > 1) resetPaging()
     else loadUsers()
   }
 
@@ -142,7 +165,7 @@ export default function Users() {
           />
           <button type="submit">Search</button>
         </form>
-        <select value={period} onChange={e => { setPage(1); setPeriod(e.target.value) }}>
+        <select value={period} onChange={e => { resetPaging(); setPeriod(e.target.value) }}>
           <option value="daily">Daily</option>
           <option value="weekly">Weekly</option>
           <option value="monthly">Monthly</option>
@@ -175,7 +198,7 @@ export default function Users() {
               const blocked = cap && spend >= cap
               return (
                 <tr key={u.scope?.user_id || i} className={blocked ? 'blocked-row' : pct && pct > 80 ? 'warning-row' : ''}>
-                  <td>{(page - 1) * PAGE_SIZE + i + 1}</td>
+                  <td>{(pageNum - 1) * PAGE_SIZE + i + 1}</td>
                   <td>
                     {blocked
                       ? <span className="badge badge-blocked">🚫 BLOCKED</span>
@@ -236,18 +259,18 @@ export default function Users() {
         </table>
       )}
 
-      {!loading && (users.length > 0 || page > 1) && (
+      {!loading && (users.length > 0 || pageNum > 1) && (
         <div className="pager">
           <button
             className="secondary-btn"
-            disabled={page <= 1}
-            onClick={() => setPage(p => Math.max(1, p - 1))}
+            disabled={pageNum <= 1}
+            onClick={goPrev}
           >← Prev</button>
-          <span className="hint">Page {page}{search ? ` · search "${search}"` : ''}</span>
+          <span className="hint">Page {pageNum}{search ? ` · search "${search}"` : ''}</span>
           <button
             className="secondary-btn"
-            disabled={!hasMore}
-            onClick={() => setPage(p => p + 1)}
+            disabled={nextCursor == null}
+            onClick={goNext}
           >Next →</button>
         </div>
       )}
