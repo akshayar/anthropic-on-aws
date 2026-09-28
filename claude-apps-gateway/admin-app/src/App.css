@@ -383,3 +383,12 @@ code {
   text-align: left;
 }
 .linklike:hover { text-decoration: underline; }
+
+/* ── Pager (users list pagination) ────────────────────────────────── */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.pager button:disabled { opacity: 0.4; cursor: not-allowed; }

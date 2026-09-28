@@ -9,8 +9,13 @@ export default function Users() {
   const [search, setSearch] = useState('')
   const [period, setPeriod] = useState('monthly')
   const [drilldown, setDrilldown] = useState(null) // { userId, email } | null
+  const [page, setPage] = useState(1)
+  const [hasMore, setHasMore] = useState(false)
+  const PAGE_SIZE = 25
 
-  useEffect(() => { loadUsers() }, [period])
+  // Reload when period or page changes. Search is applied server-side via the
+  // `q` param on submit (which resets to page 1).
+  useEffect(() => { loadUsers() }, [period, page])
 
   async function loadUsers() {
     setLoading(true)
@@ -18,17 +23,33 @@ export default function Users() {
       const data = await client.getEffective({
         period,
         sort: 'spend_desc',
-        limit: 50,
+        limit: PAGE_SIZE,
+        page,
         q: search || undefined,
       })
       // Filter to selected period only (API may return multiple)
       const filtered = (data.data || []).filter(r => r.period === period)
       setUsers(filtered)
+      // Detect whether another page exists. Prefer an explicit signal from the
+      // API (has_more / last_id, the cursor shape the list endpoint returns);
+      // otherwise fall back to "a full page came back, so assume there's more".
+      const explicit = typeof data.has_more === 'boolean'
+        ? data.has_more
+        : (data.last_id != null && data.last_id !== data.first_id)
+      setHasMore(explicit || (data.data || []).length >= PAGE_SIZE)
       setError(null)
     } catch (e) {
       setError(e.message)
     }
     setLoading(false)
+  }
+
+  function handleSearch(e) {
+    e.preventDefault()
+    // New search starts at page 1. If already on page 1, the effect won't fire,
+    // so call loadUsers directly to run the query.
+    if (page !== 1) setPage(1)
+    else loadUsers()
   }
 
   function handleSearch(e) {
@@ -121,12 +142,12 @@ export default function Users() {
           />
           <button type="submit">Search</button>
         </form>
-        <select value={period} onChange={e => setPeriod(e.target.value)}>
+        <select value={period} onChange={e => { setPage(1); setPeriod(e.target.value) }}>
           <option value="daily">Daily</option>
           <option value="weekly">Weekly</option>
           <option value="monthly">Monthly</option>
         </select>
-        <button className="secondary-btn" onClick={exportCsv}>⬇ Export CSV</button>
+        <button className="secondary-btn" onClick={exportCsv} title="Exports the rows on the current page">⬇ Export page CSV</button>
       </div>
 
       {error && <p className="error">⚠️ {error}</p>}
@@ -154,7 +175,7 @@ export default function Users() {
               const blocked = cap && spend >= cap
               return (
                 <tr key={u.scope?.user_id || i} className={blocked ? 'blocked-row' : pct && pct > 80 ? 'warning-row' : ''}>
-                  <td>{i + 1}</td>
+                  <td>{(page - 1) * PAGE_SIZE + i + 1}</td>
                   <td>
                     {blocked
                       ? <span className="badge badge-blocked">🚫 BLOCKED</span>
@@ -213,6 +234,22 @@ export default function Users() {
             )}
           </tbody>
         </table>
+      )}
+
+      {!loading && (users.length > 0 || page > 1) && (
+        <div className="pager">
+          <button
+            className="secondary-btn"
+            disabled={page <= 1}
+            onClick={() => setPage(p => Math.max(1, p - 1))}
+          >← Prev</button>
+          <span className="hint">Page {page}{search ? ` · search "${search}"` : ''}</span>
+          <button
+            className="secondary-btn"
+            disabled={!hasMore}
+            onClick={() => setPage(p => p + 1)}
+          >Next →</button>
+        </div>
       )}
 
       {drilldown && (
