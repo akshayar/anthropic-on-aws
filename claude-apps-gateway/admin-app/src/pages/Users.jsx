@@ -34,6 +34,58 @@ export default function Users() {
     loadUsers()
   }
 
+  // Raise (or set) a per-user cap for the given period. If the binding limit is
+  // ALREADY a user-scoped one, the API would stack a second user limit, so we
+  // delete the old user limit first and recreate at the new amount. If the user
+  // is blocked by a GROUP or ORG limit, we simply add a user override (user scope
+  // wins in the precedence order), leaving the group/org cap untouched.
+  async function handleRaiseCap(u) {
+    const uid = u.scope?.user_id
+    if (!uid) {
+      setError('Cannot raise cap: this row has no user_id to scope a limit to.')
+      return
+    }
+    const email = u.actor?.email_address || uid
+    const currentCap = u.amount ? (parseInt(u.amount) / 100) : null
+    const spend = parseFloat(u.period_to_date_spend || '0') / 100
+    const bindingType = u.scope?.type
+
+    const suggested = currentCap != null
+      ? Math.max(currentCap * 2, Math.ceil(spend) + 10)
+      : Math.ceil(spend) + 50
+    const input = window.prompt(
+      `Raise ${period} cap for ${email}\n`
+      + `Current: ${currentCap != null ? '$' + currentCap.toFixed(2) : 'unlimited'} (${bindingType} scope) · spent $${spend.toFixed(2)}\n\n`
+      + `Enter new ${period} cap in USD (blank = unlimited for this user):`,
+      currentCap != null ? String(suggested.toFixed(2)) : ''
+    )
+    if (input === null) return // cancelled
+
+    const trimmed = input.trim()
+    const amountCents = trimmed === '' ? null : String(Math.round(parseFloat(trimmed) * 100))
+    if (trimmed !== '' && (Number.isNaN(parseFloat(trimmed)) || parseFloat(trimmed) < 0)) {
+      setError(`Invalid amount "${trimmed}". Enter a non-negative number or leave blank for unlimited.`)
+      return
+    }
+
+    try {
+      // If the binding limit is already this user's own limit, replace it
+      // (delete then create) so we don't stack two user limits for one period.
+      if (bindingType === 'user' && u.spend_limit_id) {
+        await client.deleteLimit(u.spend_limit_id)
+      }
+      await client.createLimit({
+        scope: { type: 'user', user_id: uid },
+        amount: amountCents,
+        period,
+      })
+      setError(null)
+      await loadUsers()
+    } catch (e) {
+      setError(`Raise cap failed for ${email}: ${e.message}`)
+    }
+  }
+
   function exportCsv() {
     const headers = ['User ID', 'Email', 'Name', 'Groups', 'Spend (USD)', 'Cap (USD)', 'Period']
     const rows = users.map(u => [
@@ -89,6 +141,7 @@ export default function Users() {
               <th>Spend ({period})</th>
               <th>Effective Cap</th>
               <th>% Used</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -119,11 +172,32 @@ export default function Users() {
                       </div>
                     ) : '—'}
                   </td>
+                  <td>
+                    {(blocked || (pct != null && pct > 80)) ? (
+                      <button
+                        className="primary-btn"
+                        style={{ padding: '0.25rem 0.6rem', fontSize: '0.8rem' }}
+                        onClick={() => handleRaiseCap(u)}
+                        title={blocked ? `Raise this user's ${period} cap to unblock them` : `Raise this user's ${period} cap`}
+                      >
+                        {blocked ? '↑ Raise cap' : '↑ Raise'}
+                      </button>
+                    ) : u.scope?.user_id ? (
+                      <button
+                        className="secondary-btn"
+                        style={{ padding: '0.25rem 0.6rem', fontSize: '0.8rem' }}
+                        onClick={() => handleRaiseCap(u)}
+                        title={`Set a per-user ${period} cap`}
+                      >
+                        Set cap
+                      </button>
+                    ) : '—'}
+                  </td>
                 </tr>
               )
             })}
             {users.length === 0 && (
-              <tr><td colSpan="8" className="empty">No users found.</td></tr>
+              <tr><td colSpan="9" className="empty">No users found.</td></tr>
             )}
           </tbody>
         </table>
