@@ -31,17 +31,37 @@ export interface BootstrapStackProps extends StackProps {
   readonly albSgId: string;
   /** VPC id the gateway stack deployed into (its created VPC or your imported one). */
   readonly vpcId: string;
-  /** Entra tenant ID — issuer of the desktop app's PKCE access token. */
-  readonly entraTenantId: string;
-  /** Entra app (client) ID of the Claude Desktop PKCE public client (token audience). */
-  readonly desktopClientId: string;
   /**
-   * Authorization gate (optional but recommended beyond a single-tenant pilot).
+   * OIDC issuer of the desktop app's PKCE access token (the token `iss`). Works for any
+   * OIDC IdP. Examples:
+   *   Amazon Cognito: https://cognito-idp.<region>.amazonaws.com/<userPoolId>
+   *   Microsoft Entra: https://login.microsoftonline.com/<tenantId>/v2.0
+   */
+  readonly oidcIssuer: string;
+  /** Expected audience / client id — the Claude Desktop PKCE public client's id. */
+  readonly oidcAudience: string;
+  /**
+   * JWKS endpoint. Optional — defaults (in the server) to <issuer>/.well-known/jwks.json,
+   * which is correct for Cognito. Set for IdPs whose JWKS path differs (Entra:
+   * https://login.microsoftonline.com/<tenantId>/discovery/v2.0/keys).
+   */
+  readonly oidcJwksUri?: string;
+  /**
+   * Claim that carries the audience. Default 'aud' (OIDC id tokens, Entra). Cognito ACCESS
+   * tokens have no `aud` — the client id is in `client_id`, so set 'client_id' for Cognito.
+   */
+  readonly oidcAudienceClaim?: string;
+  /** Claim holding group memberships for the entitlement gate. Default 'groups'; 'cognito:groups' for Cognito. */
+  readonly oidcGroupsClaim?: string;
+  /** Optional comma-separated extra accepted issuers. */
+  readonly oidcAdditionalIssuers?: string;
+  /**
+   * Authorization gate (optional but recommended beyond a single-issuer pilot).
    * When set, a caller's token must carry a matching value or the request is
    * refused with 403 — authentication proves who, authorization proves entitled.
-   *   requiredGroups — Entra group object IDs matched against the `groups` claim
+   *   requiredGroups — group ids matched against the groups claim (oidcGroupsClaim)
    *   requiredRoles  — app-role values matched against the `roles` claim
-   * Both unset serves every valid tenant token (tenant membership is the boundary).
+   * Both unset serves every valid token from the issuer.
    */
   readonly requiredGroups?: string;
   readonly requiredRoles?: string;
@@ -96,7 +116,7 @@ export class BootstrapStack extends Stack {
         value:
           'Build+push the bootstrap image to the EcrRepositoryUri above, then '
           + 're-run: cdk deploy -c imageReady=true with the gateway-output context '
-          + '(publicUrl/listenerArn/albSgId/vpcId/entraTenantId/desktopClientId).',
+          + '(publicUrl/listenerArn/albSgId/vpcId/oidcIssuer/oidcAudience).',
       });
       return;
     }
@@ -215,13 +235,22 @@ export class BootstrapStack extends Stack {
         // app signs in to it with the gateway's own device-code flow, which is
         // independent of bootstrap mode.
         PUBLIC_ORIGIN: props.publicUrl,
-        ENTRA_TENANT_ID: props.entraTenantId,
-        ENTRA_AUDIENCE: props.desktopClientId,
+        // Generic OIDC resource-server validation. Works for Amazon Cognito, Microsoft
+        // Entra, Okta — any IdP that issues JWKS-verifiable tokens. IdP-specifics are
+        // config, not code. For Cognito: OIDC_ISSUER is the user-pool issuer, JWKS
+        // defaults to <issuer>/.well-known/jwks.json, audience is the app-client id in
+        // the access token's `client_id` claim, and groups come from `cognito:groups`.
+        OIDC_ISSUER: props.oidcIssuer,
+        OIDC_AUDIENCE: props.oidcAudience,
+        ...(props.oidcJwksUri ? { OIDC_JWKS_URI: props.oidcJwksUri } : {}),
+        ...(props.oidcAudienceClaim ? { OIDC_AUDIENCE_CLAIM: props.oidcAudienceClaim } : {}),
+        ...(props.oidcGroupsClaim ? { OIDC_GROUPS_CLAIM: props.oidcGroupsClaim } : {}),
+        ...(props.oidcAdditionalIssuers ? { OIDC_ADDITIONAL_ISSUERS: props.oidcAdditionalIssuers } : {}),
         CONFIG_S3_URI: `s3://${configBucket.bucketName}/${CONFIG_KEY}`,
         // Authorization gate — passed through only when configured; empty = serve
-        // every valid tenant token (single-tenant pilot boundary).
-        ...(props.requiredGroups ? { ENTRA_REQUIRED_GROUPS: props.requiredGroups } : {}),
-        ...(props.requiredRoles ? { ENTRA_REQUIRED_ROLES: props.requiredRoles } : {}),
+        // every valid token from the issuer (single-issuer pilot boundary).
+        ...(props.requiredGroups ? { OIDC_REQUIRED_GROUPS: props.requiredGroups } : {}),
+        ...(props.requiredRoles ? { OIDC_REQUIRED_ROLES: props.requiredRoles } : {}),
       },
     });
     configBucket.grantRead(taskDef.taskRole);
@@ -246,8 +275,8 @@ export class BootstrapStack extends Stack {
         id: 'AwsSolutions-ECS2',
         reason:
           'All environment values are non-sensitive by design (PKCE mode): public origin, '
-          + 'Entra tenant/audience IDs (public identifiers), S3 config URI. The task holds '
-          + 'no secrets — token validation uses the public Entra JWKS.',
+          + 'OIDC issuer/audience/client id (public identifiers), S3 config URI. The task holds '
+          + 'no secrets — token validation uses the IdP\'s public JWKS.',
       },
     );
 

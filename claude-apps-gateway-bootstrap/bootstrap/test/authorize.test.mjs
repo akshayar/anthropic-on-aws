@@ -38,3 +38,15 @@ test('both gates: AND across dimensions, OR within each', () => {
   assert.equal(isEntitled({ groups: [G] }, ...req), false);
   assert.equal(isEntitled({ roles: ['bootstrap-user'] }, ...req), false);
 });
+
+test('configurable groups claim: Cognito cognito:groups is honored', () => {
+  // Amazon Cognito emits group membership in `cognito:groups`, not `groups`.
+  // The 4th arg selects the claim so the same gate works across IdPs.
+  const cognito = { 'cognito:groups': ['engineering'], sub: 'u1' };
+  assert.equal(isEntitled(cognito, ['engineering'], [], 'cognito:groups'), true);
+  assert.equal(isEntitled(cognito, ['business'], [], 'cognito:groups'), false);
+  // With the default 'groups' claim, a Cognito token would NOT match (claim absent).
+  assert.equal(isEntitled(cognito, ['engineering'], []), false);
+  // Default still works for Entra-style `groups`.
+  assert.equal(isEntitled({ groups: [G] }, [G], []), true);
+});

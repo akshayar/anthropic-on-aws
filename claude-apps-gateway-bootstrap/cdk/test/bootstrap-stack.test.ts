@@ -23,8 +23,8 @@ function synthPass1(): Template {
     listenerArn: '',
     albSgId: '',
     vpcId: '',
-    entraTenantId: '',
-    desktopClientId: '',
+    oidcIssuer: '',
+    oidcAudience: '',
   });
   return Template.fromStack(stack);
 }

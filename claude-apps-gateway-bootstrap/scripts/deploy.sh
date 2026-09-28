@@ -30,12 +30,17 @@ source .env
 : "${LISTENER_ARN:?set LISTENER_ARN in .env (see README prerequisites)}"
 : "${ALB_SG_ID:?set ALB_SG_ID in .env}"
 : "${VPC_ID:?set VPC_ID in .env}"
-: "${ENTRA_TENANT_ID:?set ENTRA_TENANT_ID in .env}"
-: "${DESKTOP_CLIENT_ID:?set DESKTOP_CLIENT_ID in .env}"
+: "${OIDC_ISSUER:?set OIDC_ISSUER in .env (e.g. https://cognito-idp.<region>.amazonaws.com/<userPoolId>)}"
+: "${OIDC_AUDIENCE:?set OIDC_AUDIENCE in .env (the desktop PKCE public-client id)}"
 
 CTX=(-c "region=${AWS_REGION}" -c "publicUrl=${PUBLIC_URL}" -c "listenerArn=${LISTENER_ARN}"
-     -c "albSgId=${ALB_SG_ID}" -c "vpcId=${VPC_ID}" -c "entraTenantId=${ENTRA_TENANT_ID}"
-     -c "desktopClientId=${DESKTOP_CLIENT_ID}")
+     -c "albSgId=${ALB_SG_ID}" -c "vpcId=${VPC_ID}" -c "oidcIssuer=${OIDC_ISSUER}"
+     -c "oidcAudience=${OIDC_AUDIENCE}")
+# Optional OIDC knobs (defaults suit Cognito access tokens: audience in client_id, groups in cognito:groups).
+[ -n "${OIDC_JWKS_URI:-}" ] && CTX+=(-c "oidcJwksUri=${OIDC_JWKS_URI}")
+[ -n "${OIDC_AUDIENCE_CLAIM:-}" ] && CTX+=(-c "oidcAudienceClaim=${OIDC_AUDIENCE_CLAIM}")
+[ -n "${OIDC_GROUPS_CLAIM:-}" ] && CTX+=(-c "oidcGroupsClaim=${OIDC_GROUPS_CLAIM}")
+[ -n "${OIDC_ADDITIONAL_ISSUERS:-}" ] && CTX+=(-c "oidcAdditionalIssuers=${OIDC_ADDITIONAL_ISSUERS}")
 # Optional authorization gate (see README "Restricting who receives configuration").
 [ -n "${REQUIRED_GROUPS:-}" ] && CTX+=(-c "requiredGroups=${REQUIRED_GROUPS}")
 [ -n "${REQUIRED_ROLES:-}" ] && CTX+=(-c "requiredRoles=${REQUIRED_ROLES}")

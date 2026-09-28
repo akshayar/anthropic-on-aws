@@ -25,8 +25,9 @@ import { BootstrapStack } from '../lib/bootstrap-stack';
  *   listenerArn      HTTPS :443 listener ARN of the gateway ALB (README lookup)
  *   albSgId          security-group id of the gateway ALB
  *   vpcId            VPC id the gateway deployed into
- *   entraTenantId    Entra tenant ID (PKCE token issuer)
- *   desktopClientId  Entra app id of the Claude Desktop PKCE public client
+ *   oidcIssuer       OIDC issuer of the desktop PKCE token (Cognito user-pool issuer,
+ *                    Entra .../v2.0, etc.)
+ *   oidcAudience     Desktop PKCE public client id (the token's audience / client_id)
  *   imageTag         ECR image tag for the bootstrap image (default 'latest')
  */
 const app = new cdk.App();
@@ -60,9 +61,14 @@ new BootstrapStack(app, 'ClaudeBootstrapStack', {
   listenerArn: req('listenerArn') ?? '',
   albSgId: req('albSgId') ?? '',
   vpcId: req('vpcId') ?? '',
-  entraTenantId: req('entraTenantId') ?? '',
-  desktopClientId: req('desktopClientId') ?? '',
-  // Optional authorization gate (comma-separated). Omit for a single-tenant pilot.
+  oidcIssuer: req('oidcIssuer') ?? '',
+  oidcAudience: req('oidcAudience') ?? '',
+  // Optional OIDC knobs (defaults suit Cognito; set for other IdPs).
+  oidcJwksUri: ctx('oidcJwksUri'),
+  oidcAudienceClaim: ctx('oidcAudienceClaim'),
+  oidcGroupsClaim: ctx('oidcGroupsClaim'),
+  oidcAdditionalIssuers: ctx('oidcAdditionalIssuers'),
+  // Optional authorization gate (comma-separated). Omit for a single-issuer pilot.
   requiredGroups: ctx('requiredGroups'),
   requiredRoles: ctx('requiredRoles'),
   imageTag: ctx('imageTag'),
