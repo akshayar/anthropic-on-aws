@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react'
 import { client } from '../api'
+import { CONFIG_GROUPS } from '../configGroups'
 
 export default function SpendLimits() {
   const [limits, setLimits] = useState([])
   const [effective, setEffective] = useState({})
   const [knownUsers, setKnownUsers] = useState([])
+  const [knownGroups, setKnownGroups] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [showForm, setShowForm] = useState(false)
@@ -32,6 +34,9 @@ export default function SpendLimits() {
       const spendMap = {}
       const users = []
       const seenUsers = new Set()
+      // Seed with groups declared in the gateway config (baked in at build time),
+      // so a group that exists in config but has generated no spend yet still shows.
+      const seenGroups = new Set(CONFIG_GROUPS)
       for (const entry of [...(dailyData.data || []), ...(weeklyData.data || []), ...(monthlyData.data || [])]) {
         if (entry.spend_limit_id) {
           spendMap[entry.spend_limit_id] = spendMap[entry.spend_limit_id] || []
@@ -46,9 +51,15 @@ export default function SpendLimits() {
           seenUsers.add(uid)
           users.push({ id: uid, email: entry.actor?.email_address || uid })
         }
+        // Harvest distinct IdP group names so the group-cap picker can suggest them
+        // instead of the admin typing a group blind.
+        for (const g of entry.groups || []) {
+          if (g && !seenGroups.has(g)) seenGroups.add(g)
+        }
       }
       setEffective(spendMap)
       setKnownUsers(users)
+      setKnownGroups([...seenGroups].sort())
       setError(null)
     } catch (e) {
       setError(e.message)
@@ -70,6 +81,21 @@ export default function SpendLimits() {
       scope.user_id = (byId && byId.id) || (byEmail && byEmail.id) || trimmed
     }
     if (scopeType === 'rbac_group') scope.rbac_group_id = scopeId.trim()
+
+    // Guard against silently stacking a second cap on the same scope+period.
+    // The API allows it, but it's almost always an accident, so confirm first.
+    const dup = limits.find(l =>
+      l.period === period &&
+      l.scope?.type === scope.type &&
+      (l.scope?.user_id || '') === (scope.user_id || '') &&
+      (l.scope?.rbac_group_id || '') === (scope.rbac_group_id || '')
+    )
+    if (dup) {
+      const existing = dup.amount ? `$${(parseInt(dup.amount) / 100).toFixed(2)}` : 'Unlimited'
+      if (!confirm(`A ${period} limit already exists for this scope (${existing}). Create another anyway? Delete the old one instead if you meant to change it.`)) {
+        return
+      }
+    }
 
     try {
       await client.createLimit({
@@ -138,6 +164,24 @@ export default function SpendLimits() {
                     <span className="hint">✓ {knownUsers.find(u => u.id === scopeId).email}</span>
                   )}
                   <span className="hint">Pick a known user by email, or paste an OIDC sub (user ID) directly.</span>
+                </div>
+              ) : scopeType === 'rbac_group' && knownGroups.length > 0 ? (
+                <div className="autocomplete">
+                  <input
+                    value={scopeId}
+                    onChange={e => setScopeId(e.target.value)}
+                    placeholder="Search or type a group name..."
+                    list="group-list"
+                    required
+                  />
+                  <datalist id="group-list">
+                    {knownGroups
+                      .filter(g => !scopeId || g.toLowerCase().includes(scopeId.toLowerCase()))
+                      .map(g => (
+                        <option key={g} value={g} />
+                      ))}
+                  </datalist>
+                  <span className="hint">Pick a known IdP group, or type a group name the gateway config uses.</span>
                 </div>
               ) : (
                 <input value={scopeId} onChange={e => setScopeId(e.target.value)} required
