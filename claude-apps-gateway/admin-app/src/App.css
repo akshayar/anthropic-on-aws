@@ -320,3 +320,66 @@ code {
 /* Autocomplete */
 .autocomplete { display: flex; flex-direction: column; gap: 0.25rem; flex: 1; }
 .autocomplete input { width: 100%; min-width: 300px; }
+
+/* ── Per-user drilldown modal ─────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 1rem;
+}
+.modal-card {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  width: 100%;
+  max-width: 520px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+.modal-head h3 { margin: 0; font-size: 1.05rem; }
+.modal-close {
+  background: transparent;
+  color: var(--text-dim);
+  border: none;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.25rem;
+}
+.modal-close:hover { color: var(--text); }
+.drilldown-table { width: 100%; margin-top: 0.75rem; }
+.drilldown-table th {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  padding: 0.35rem 0.5rem;
+}
+.drilldown-table td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+/* inline link-style button (opens the drilldown from a table cell) */
+.linklike {
+  background: none;
+  border: none;
+  color: var(--accent-hover);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+}
+.linklike:hover { text-decoration: underline; }

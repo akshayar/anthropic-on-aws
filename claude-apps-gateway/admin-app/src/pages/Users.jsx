@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { client } from '../api'
+import UserDrilldown from './UserDrilldown'
 
 export default function Users() {
   const [users, setUsers] = useState([])
@@ -7,6 +8,7 @@ export default function Users() {
   const [error, setError] = useState(null)
   const [search, setSearch] = useState('')
   const [period, setPeriod] = useState('monthly')
+  const [drilldown, setDrilldown] = useState(null) // { userId, email } | null
 
   useEffect(() => { loadUsers() }, [period])
 
@@ -160,7 +162,17 @@ export default function Users() {
                     }
                   </td>
                   <td>{u.actor?.name || '—'}</td>
-                  <td>{u.actor?.email_address || u.scope?.user_id || '—'}</td>
+                  <td>
+                    {u.scope?.user_id ? (
+                      <button
+                        className="linklike"
+                        onClick={() => setDrilldown({ userId: u.scope.user_id, email: u.actor?.email_address || u.scope.user_id })}
+                        title="View this user's spend profile"
+                      >
+                        {u.actor?.email_address || u.scope.user_id}
+                      </button>
+                    ) : (u.actor?.email_address || '—')}
+                  </td>
                   <td>{(u.groups || []).join(', ') || '—'}</td>
                   <td className={blocked ? 'over-limit money' : 'money'}>${spend.toFixed(2)}</td>
                   <td className="money">{cap != null ? `$${cap.toFixed(2)}` : 'Unlimited'}</td>
@@ -201,6 +213,14 @@ export default function Users() {
             )}
           </tbody>
         </table>
+      )}
+
+      {drilldown && (
+        <UserDrilldown
+          userId={drilldown.userId}
+          email={drilldown.email}
+          onClose={() => setDrilldown(null)}
+        />
       )}
     </div>
   )
