@@ -7,6 +7,7 @@ import SpendLimits from './pages/SpendLimits'
 import Users from './pages/Users'
 import Audit from './pages/Audit'
 import Settings from './pages/Settings'
+import GatewayConfig from './pages/GatewayConfig'
 import './App.css'
 
 function App() {
@@ -113,23 +114,26 @@ function App() {
             <li><NavLink to="/spend-limits">Spend Limits</NavLink></li>
             <li><NavLink to="/users">Users</NavLink></li>
             <li><NavLink to="/audit">Audit Log</NavLink></li>
+            <li><NavLink to="/config">Gateway Config</NavLink></li>
             <li><NavLink to="/settings">Settings</NavLink></li>
           </ul>
         </nav>
         <main className="content">
-          {!isLoggedIn && (
+          {!isLoggedIn ? (
             <div className="api-key-banner">
               🔐 Login with SSO to access admin data. Your Okta account must be in the <strong>QuickAdmin</strong> group.
               <br /><small>Or set an API key in Settings for automation.</small>
             </div>
+          ) : (
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/spend-limits" element={<SpendLimits />} />
+              <Route path="/users" element={<Users />} />
+              <Route path="/audit" element={<Audit />} />
+              <Route path="/config" element={<GatewayConfig />} />
+              <Route path="/settings" element={<Settings onApiKey={handleApiKey} />} />
+            </Routes>
           )}
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/spend-limits" element={<SpendLimits />} />
-            <Route path="/users" element={<Users />} />
-            <Route path="/audit" element={<Audit />} />
-            <Route path="/settings" element={<Settings onApiKey={handleApiKey} />} />
-          </Routes>
         </main>
       </div>
     </BrowserRouter>

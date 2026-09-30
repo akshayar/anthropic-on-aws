@@ -115,6 +115,8 @@ tr:hover { background: rgba(99, 102, 241, 0.05); }
 .warning-row { background: rgba(245, 158, 11, 0.08); }
 .money { font-family: 'SF Mono', monospace; text-align: right; }
 .mono { font-family: 'SF Mono', monospace; font-size: 0.8rem; }
+.clickable { cursor: pointer; }
+.clickable:hover { text-decoration: underline; }
 .empty { color: var(--text-dim); text-align: center; padding: 2rem; }
 
 /* Buttons */

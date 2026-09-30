@@ -77,6 +77,24 @@ phases:
       - docker push ${ADMIN_URI}:latest
 EOF
 
+# --- Bake the LIVE gateway config into the image ---------------------------
+# The CodeBuild context is only admin-app/ (uploaded below), so the in-container
+# prebuild CANNOT reach cdk/gateway.yaml — it keeps whatever src/gatewayConfig.js
+# is staged. So we regenerate that snapshot HERE, from the stamped cdk/gateway.yaml,
+# BEFORE staging. Otherwise the admin "Gateway Config" page ships the generic
+# template placeholders (@@...@@) instead of the real deployed values.
+STAMPED_CONFIG="${GATEWAY_CONFIG:-${PROJECT_DIR}/gateway.yaml}"
+if [ -f "$STAMPED_CONFIG" ]; then
+  echo "   Baking live gateway config snapshot from ${STAMPED_CONFIG} ..."
+  ( cd "${REPO_ROOT}/admin-app" && GATEWAY_CONFIG="$STAMPED_CONFIG" node scripts/extract-gateway-config.mjs )
+else
+  echo "   ⚠️  No stamped gateway config at ${STAMPED_CONFIG}."
+  echo "      The image will bake whatever src/gatewayConfig.js is committed"
+  echo "      (likely the template placeholders). Run scripts/deploy.sh first so"
+  echo "      stamp-config.sh produces cdk/gateway.yaml, or set GATEWAY_CONFIG=/path."
+fi
+# ---------------------------------------------------------------------------
+
 # Stage the build context to S3. The Dockerfile + nginx.conf now live INSIDE
 # admin-app/, so uploading admin-app/ carries them too (context = repo root).
 echo "   Uploading build context to s3://$BUCKET/admin/ ..."

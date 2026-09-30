@@ -8,6 +8,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as r53targets from 'aws-cdk-lib/aws-route53-targets';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 
@@ -22,6 +23,12 @@ export interface GatewayStackProps extends cdk.StackProps {
   readonly zoneName?: string;
   /** Route 53 private hosted-zone id (optional; looked up from zoneName if omitted). */
   readonly zoneId?: string;
+  /**
+   * Extra stable hostname always published as a CNAME to the ALB (default gw.<zoneName>).
+   * Churn-free + cross-region-resolvable; the durable name to migrate clients onto later.
+   * Skipped automatically when it would duplicate the primary (publicUrl) host.
+   */
+  readonly secondaryHost?: string;
   /** VPN/corp CLIENT CIDR developers connect from — NOT the VPC CIDR. */
   readonly ingressCidr?: string;
   /** Import an existing VPC instead of creating one. */
@@ -377,9 +384,11 @@ export class GatewayStack extends cdk.Stack {
       certificate,
       sslPolicy: elbv2.SslPolicy.TLS13_RES,
       idleTimeout: cdk.Duration.seconds(3600), // long streaming responses
-      // Route 53 private record: claude-gateway.<zoneName> → the internal ALB.
-      domainName: recordHost,
-      domainZone: privateZone,
+      // NOTE: DNS record is created explicitly AFTER this service (see below), NOT via
+      // the pattern's domainName/domainZone props. Those always create an ALIAS A-record,
+      // which (a) doesn't resolve cross-region in a private zone and (b) is illegal to
+      // co-exist with a CNAME at the same name. We create a CNAME for a non-apex host
+      // (churn-free + cross-region) and fall back to the alias A-record only at the apex.
       healthCheckGracePeriod: cdk.Duration.seconds(120),
       taskImageOptions: {
         image,
@@ -417,6 +426,57 @@ export class GatewayStack extends cdk.Stack {
     // named "web" is the one carrying it, so a reordering can't silently move it.
     const cfnGatewayTaskDef = fargate.taskDefinition.node.defaultChild as ecs.CfnTaskDefinition;
     cfnGatewayTaskDef.addPropertyOverride('ContainerDefinitions.0.StopTimeout', 40);
+
+    // ── Route 53 private records → the internal ALB ───────────────────────────
+    // We publish TWO names for the one ALB so the gateway can be baked to the
+    // hostname CLIENTS actually bootstrap from (public_url drives the OIDC redirect,
+    // so it MUST match what clients use) WHILE a stable, churn-free alias also exists:
+    //
+    //  • PRIMARY  = recordHost (whatever public_url is). At the zone apex this must be
+    //    an ALIAS A-record (a CNAME is illegal at the apex — collides with SOA/NS);
+    //    for a non-apex host it is a CNAME to the ALB DNS name.
+    //  • SECONDARY = gw.<zoneName>, ALWAYS a CNAME to the ALB DNS name. A CNAME follows
+    //    the ALB across replacements (the ALB DNS name is stable even when its private
+    //    IPs change) and resolves cross-region — unlike a private-zone alias A-record.
+    //    This is the durable name to migrate clients onto later; it costs nothing to
+    //    keep published now. Skipped only when it would duplicate the primary.
+    const norm = (h: string) => h.replace(/\.$/, '');
+    const isApex = norm(recordHost) === norm(zoneName);
+    const secondaryHost = props.secondaryHost ?? `gw.${zoneName}`;
+
+    // IMPORTANT — distinct logical IDs per record TYPE. The primary host can be an
+    // ARecord (apex) OR a CnameRecord (non-apex) depending on public_url. If BOTH
+    // used one logical id (e.g. 'GatewayDns'), flipping public_url apex<->non-apex
+    // would make CloudFormation mutate the SAME logical id from A to CNAME, which it
+    // does as delete-old + create-new; on Route 53 that delete has, in practice,
+    // raced and wiped the sibling gw. record (observed 2026-09-28). Giving each type
+    // its own id ('...Apex' vs '...Host') makes a mode switch a clean create of the
+    // new id + delete of the old id — never an in-place type mutation. Only one of
+    // the two ever exists per deploy.
+    if (isApex) {
+      new route53.ARecord(this, 'GatewayDnsApex', {
+        zone: privateZone,
+        recordName: recordHost,
+        target: route53.RecordTarget.fromAlias(new r53targets.LoadBalancerTarget(gatewayAlb)),
+      });
+    } else {
+      new route53.CnameRecord(this, 'GatewayDnsHost', {
+        zone: privateZone,
+        recordName: recordHost,
+        domainName: gatewayAlb.loadBalancerDnsName,
+        ttl: cdk.Duration.seconds(60),
+      });
+    }
+
+    // Secondary stable CNAME (gw.<zone>) — always published unless it equals the primary.
+    if (norm(secondaryHost) !== norm(recordHost)) {
+      new route53.CnameRecord(this, 'GatewayDnsSecondary', {
+        zone: privateZone,
+        recordName: secondaryHost,
+        domainName: gatewayAlb.loadBalancerDnsName,
+        ttl: cdk.Duration.seconds(60),
+      });
+    }
 
     // Restrict the ALB's 443 ingress to the VPN/corp client CIDR (not 0.0.0.0/0).
     // openListener:false above suppressed the pattern's default wide-open rule.

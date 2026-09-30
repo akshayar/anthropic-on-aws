@@ -64,6 +64,14 @@ class GatewayAdminClient {
     return res.json();
   }
 
+  // ─── Gateway Config (bootstrap) ───────────────────────────────────
+  // /user/bootstrap serves the Desktop config for the caller's group
+  // (models, managed MCP servers, desktop block). Requires the caller's
+  // group to have a `desktop:` block in gateway.yaml — else 404.
+  async bootstrap() {
+    return this._fetch(`/user/bootstrap`);
+  }
+
   // ─── Spend Limits ─────────────────────────────────────────────────
 
   async listLimits({ limit = 20, afterId } = {}) {

@@ -737,17 +737,43 @@ else
   info "created HTTPS:443 listener (cert ${CERT_ARN})"
 fi
 
-# 6d. Route 53 private A-record (alias to the ALB).
+# 6d. Route 53 private record for the gateway hostname.
+#   Non-apex hostname  -> CNAME to the ALB's DNS name. A CNAME follows the ALB across
+#                         replacements (no IP churn) AND resolves cross-region, so this
+#                         is preferred (see docs/proposal-dns-cname-fix.md).
+#   Apex hostname (RECORD_NAME == ZONE_NAME) -> a CNAME is ILLEGAL at a zone apex
+#                         (collides with SOA/NS), so fall back to an ALIAS A-record.
+#                         The alias follows the ALB by name (no literal IPs) but only
+#                         resolves within the ALB's OWN region; cross-region resolvers
+#                         get NXDOMAIN. To go cross-region, move to a non-apex hostname.
 RECORD_NAME="${PUBLIC_URL#https://}"
-CHANGE_BATCH=$(cat <<JSON
+# Normalise trailing dots for the apex comparison.
+_rec="${RECORD_NAME%.}"
+_zone="${ZONE_NAME%.}"
+if [[ "${_rec}" == "${_zone}" ]]; then
+  echo "WARNING: ${RECORD_NAME} is the zone apex — a CNAME is illegal there, using an ALIAS A-record."
+  echo "         An apex alias resolves only within the ALB's region (${AWS_REGION}); cross-region"
+  echo "         resolvers get NXDOMAIN. For cross-region, use a NON-APEX hostname (e.g. gw.${_zone})."
+  CHANGE_BATCH=$(cat <<JSON
 {"Changes":[{"Action":"UPSERT","ResourceRecordSet":{
   "Name":"${RECORD_NAME}","Type":"A",
   "AliasTarget":{"HostedZoneId":"${ALB_ZONE}","DNSName":"${ALB_DNS}","EvaluateTargetHealth":true}}}]}
 JSON
 )
+  _rectype="ALIAS A-record"
+else
+  # Non-apex: CNAME to the ALB DNS name — the preferred, churn-free, cross-region-safe form.
+  CHANGE_BATCH=$(cat <<JSON
+{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{
+  "Name":"${RECORD_NAME}","Type":"CNAME","TTL":60,
+  "ResourceRecords":[{"Value":"${ALB_DNS}"}]}}]}
+JSON
+)
+  _rectype="CNAME"
+fi
 aws route53 change-resource-record-sets --hosted-zone-id "${ZONE_ID}" \
   --change-batch "${CHANGE_BATCH}" >/dev/null
-info "upserted Route 53 A-record ${RECORD_NAME} → ${ALB_DNS}"
+info "upserted Route 53 ${_rectype} ${RECORD_NAME} → ${ALB_DNS}"
 
 # 6e. Gateway task definition. NO non-secret app config — it's BAKED into the image.
 # Secrets injected as env vars. DB_USER/DB_PASSWORD come from the RDS-managed master

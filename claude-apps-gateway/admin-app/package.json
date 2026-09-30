@@ -4,13 +4,14 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "predev": "node scripts/extract-config-groups.mjs",
+    "predev": "node scripts/extract-config-groups.mjs && node scripts/extract-gateway-config.mjs",
     "dev": "vite",
-    "prebuild": "node scripts/extract-config-groups.mjs",
+    "prebuild": "node scripts/extract-config-groups.mjs && node scripts/extract-gateway-config.mjs",
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "extract-groups": "node scripts/extract-config-groups.mjs"
+    "extract-groups": "node scripts/extract-config-groups.mjs",
+    "extract-config": "node scripts/extract-gateway-config.mjs"
   },
   "dependencies": {
     "react": "^19.2.7",
