@@ -9,6 +9,16 @@ export interface DbStackProps extends cdk.StackProps {
   readonly vpcId?: string;
   /** Database name (default 'claude_gateway'). */
   readonly dbName?: string;
+  /** RDS instance type as a string, e.g. 'db.t4g.micro' / 'db.t4g.small' / 'db.t4g.medium'.
+   *  Right-size by user tier (see the cost estimate doc). Default 'db.t4g.micro'
+   *  (Graviton — ~20% cheaper than t3 at the same performance class). */
+  readonly dbInstanceType?: string;
+  /** Allocated storage in GB (default 20). */
+  readonly dbAllocatedStorage?: number;
+  /** Multi-AZ high availability (default true — durable spend/audit/PII data). */
+  readonly dbMultiAz?: boolean;
+  /** Automated-backup retention in days (default 7). */
+  readonly dbBackupRetentionDays?: number;
 }
 
 /**
@@ -33,6 +43,14 @@ export class DbStack extends cdk.Stack {
     super(scope, id, props);
 
     const dbName = props.dbName ?? 'claude_gateway';
+    // Instance type is parameter-driven. Default db.t4g.micro (Graviton). Right-size
+    // per user tier: db.t4g.micro (1-200) / db.t4g.small (200-500) / db.t4g.medium (500-1000).
+    const instanceTypeStr = props.dbInstanceType ?? 'db.t4g.micro';
+    const instanceType = new ec2.InstanceType(instanceTypeStr.replace(/^db\./, ''));
+    const allocatedStorage = props.dbAllocatedStorage ?? 20;
+    const multiAz = props.dbMultiAz ?? true;
+    const backupRetentionDays = props.dbBackupRetentionDays ?? 7;
+
     const vpc = props.vpcId
       ? (ec2.Vpc.fromLookup(this, 'Vpc', { vpcId: props.vpcId }) as ec2.IVpc)
       : new ec2.Vpc(this, 'Vpc', { maxAzs: 2, natGateways: 1 });
@@ -50,16 +68,16 @@ export class DbStack extends cdk.Stack {
       engine: rds.DatabaseInstanceEngine.postgres({ version: rds.PostgresEngineVersion.VER_16 }),
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.BURSTABLE3, ec2.InstanceSize.MICRO),
+      instanceType,
       databaseName: dbName,
       credentials: rds.Credentials.fromGeneratedSecret('gateway'),
       securityGroups: [dbSg],
-      allocatedStorage: 20,
+      allocatedStorage,
       storageType: rds.StorageType.GP3,
       storageEncrypted: true,
-      multiAz: true,
+      multiAz,
       publiclyAccessible: false,
-      backupRetention: cdk.Duration.days(7),
+      backupRetention: cdk.Duration.days(backupRetentionDays),
       deletionProtection: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });

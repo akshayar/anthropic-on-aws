@@ -98,6 +98,12 @@ fi
 [ -n "${DB_SECRET_ARN:-}" ] && CDK_CTX+=(-c "dbSecretArn=${DB_SECRET_ARN}")
 [ -n "${DB_SG_ID:-}" ]      && CDK_CTX+=(-c "dbSecurityGroupId=${DB_SG_ID}")
 [ -n "${DB_NAME:-}" ]       && CDK_CTX+=(-c "dbName=${DB_NAME}")
+# Optional: right-size the DbStack RDS instance. Only used when the DbStack owns the
+# DB (i.e. DB_ENDPOINT unset). Defaults in db-stack.ts: db.t4g.micro, Multi-AZ true,
+# 7-day backups. DB_INSTANCE_TYPE must be a full RDS class (e.g. db.t4g.small);
+# DB_MULTI_AZ is "true"/"false".
+[ -n "${DB_INSTANCE_TYPE:-}" ] && CDK_CTX+=(-c "dbInstanceType=${DB_INSTANCE_TYPE}")
+[ -n "${DB_MULTI_AZ:-}" ]      && CDK_CTX+=(-c "dbMultiAz=${DB_MULTI_AZ}")
 # Optional: deploy the admin web app (WIP). ADMIN_READY=true in .env opts in — it
 # creates the claude-gateway-admin ECR repo (pass 1) and the AdminService (pass 2).
 # The admin image must be built+pushed BETWEEN the passes; build-admin-image.sh
@@ -134,7 +140,14 @@ BUCKET="claude-gateway-build-${ACCOUNT_ID}"
 # otherwise (only bites a first-ever run, where the project doesn't yet exist).
 aws s3 mb "s3://$BUCKET" 2>/dev/null || true
 
-# Check if CodeBuild project exists, create if not
+# Create the CodeBuild role + project only if absent, but ALWAYS (re)apply the
+# role policy below — the policy's ECR Resource is scoped to ${REPO_NAME}, which
+# tracks GATEWAY_NAME. If GATEWAY_NAME changes between runs (e.g. a distinct name
+# per account to avoid fixed-name collisions — see docs/gotchas.md §22), the repo
+# ARN changes too; a create-once-only guard would leave the policy pinned to the
+# OLD repo and `docker push` to the new repo fails in POST_BUILD with
+# `ecr:InitiateLayerUpload ... not authorized`. Reconciling every run keeps the
+# push permission aligned with the current repo. (Verified live 2026-09-30.)
 if ! aws codebuild batch-get-projects --names claude-gateway-build --query "projects[0].name" --output text 2>/dev/null | grep -q claude-gateway-build; then
   echo "   Creating CodeBuild project..."
 
@@ -142,9 +155,16 @@ if ! aws codebuild batch-get-projects --names claude-gateway-build --query "proj
   aws iam create-role --role-name claude-gateway-codebuild \
     --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"codebuild.amazonaws.com"},"Action":"sts:AssumeRole"}]}' 2>/dev/null || true
 
-  aws iam put-role-policy --role-name claude-gateway-codebuild --policy-name build-perms \
-    --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],\"Resource\":[\"arn:aws:s3:::claude-gateway-build-${ACCOUNT_ID}\",\"arn:aws:s3:::claude-gateway-build-${ACCOUNT_ID}/*\"]},{\"Effect\":\"Allow\",\"Action\":[\"ecr:GetAuthorizationToken\"],\"Resource\":\"*\"},{\"Effect\":\"Allow\",\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\",\"ecr:PutImage\",\"ecr:InitiateLayerUpload\",\"ecr:UploadLayerPart\",\"ecr:CompleteLayerUpload\"],\"Resource\":\"arn:aws:ecr:${DEPLOY_REGION}:${ACCOUNT_ID}:repository/${REPO_NAME}\"},{ \"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Resource\":\"*\"}]}" 2>/dev/null
+  CODEBUILD_PROJECT_NEW=1
+fi
 
+# ALWAYS reconcile the role policy so the ECR resource ARN matches the current
+# ${REPO_NAME} (put-role-policy is idempotent — it overwrites the inline policy).
+aws iam put-role-policy --role-name claude-gateway-codebuild --policy-name build-perms \
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],\"Resource\":[\"arn:aws:s3:::claude-gateway-build-${ACCOUNT_ID}\",\"arn:aws:s3:::claude-gateway-build-${ACCOUNT_ID}/*\"]},{\"Effect\":\"Allow\",\"Action\":[\"ecr:GetAuthorizationToken\"],\"Resource\":\"*\"},{\"Effect\":\"Allow\",\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\",\"ecr:PutImage\",\"ecr:InitiateLayerUpload\",\"ecr:UploadLayerPart\",\"ecr:CompleteLayerUpload\"],\"Resource\":\"arn:aws:ecr:${DEPLOY_REGION}:${ACCOUNT_ID}:repository/${REPO_NAME}\"},{ \"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Resource\":\"*\"}]}" 2>/dev/null
+
+# Create the project only on first run (after the role + policy exist and propagate).
+if [ "${CODEBUILD_PROJECT_NEW:-0}" = "1" ]; then
   sleep 10  # Wait for IAM propagation
 
   aws codebuild create-project --name claude-gateway-build \

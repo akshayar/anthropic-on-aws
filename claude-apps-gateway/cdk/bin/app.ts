@@ -43,7 +43,10 @@ import { DbStack } from '../lib/db-stack';
  */
 const app = new cdk.App();
 
-const ctx = (k: string): string | undefined => app.node.tryGetContext(k);
+const ctx = (k: string): string | undefined => {
+  const v = app.node.tryGetContext(k);
+  return v !== undefined && v !== null ? String(v) : undefined;
+};
 const region = ctx('region') ?? process.env.CDK_DEFAULT_REGION ?? 'us-east-1';
 // Region of the Bedrock endpoint the task calls. Defaults to the deploy region
 // (the common single-region case); set -c bedrockRegion to point the upstream +
@@ -64,11 +67,20 @@ let dbSecurityGroupId = ctx('dbSecurityGroupId');
 let dbName = ctx('dbName');
 
 if (!dbEndpoint) {
+  const dbMultiAzCtx = ctx('dbMultiAz');
+  const dbAllocatedStorageCtx = ctx('dbAllocatedStorage');
+  const dbBackupRetentionCtx = ctx('dbBackupRetentionDays');
   const dbStack = new DbStack(app, 'ClaudeGatewayDbStack', {
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region },
     description: 'Claude apps gateway database (separate lifecycle from the gateway stack)',
     vpcId,
     dbName,
+    // RDS sizing / HA / backups — parameter-driven (params file or -c). Defaults:
+    // db.t4g.micro, 20 GB, multiAz true, 7-day backups.
+    dbInstanceType: ctx('dbInstanceType'),
+    dbAllocatedStorage: dbAllocatedStorageCtx ? Number(dbAllocatedStorageCtx) : undefined,
+    dbMultiAz: dbMultiAzCtx !== undefined ? dbMultiAzCtx === 'true' : undefined,
+    dbBackupRetentionDays: dbBackupRetentionCtx ? Number(dbBackupRetentionCtx) : undefined,
   });
   dbEndpoint = dbStack.dbEndpoint;
   dbSecretArn = dbStack.dbSecretArn;

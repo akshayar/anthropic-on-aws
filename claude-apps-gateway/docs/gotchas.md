@@ -532,3 +532,79 @@ until fixed (all verified live 2026-09-26):
   cross-stack DB export; deploy `ClaudeGatewayStack --exclusively` and keep
   `-c adminReady=true` or the admin app (`:3000`) is torn down. And force an ECS
   rollout — an unchanged `:latest` tag won't restart the tasks on its own.
+
+## 22. Fixed-name resources collide when re-deploying into an account that had a prior gateway run  **[hit live]**
+
+**Symptom.** A fresh CDK deploy into an account that previously hosted a gateway
+(even a partial or long-deleted one) fails at pass-2 changeset validation with:
+
+```
+Resource of type 'AWS::Logs::LogGroup' with identifier '/claude-gateway/gateway'
+already exists.
+```
+
+CloudFormation reports the offending resource but never executes the changeset, so
+nothing new is deployed. `describe-stack-resources --physical-resource-id
+/claude-gateway/gateway` returns *"Stack ... does not exist"* — the resource is a
+dangling orphan owned by **no** live stack.
+
+**Why.** Several stack resources are given **fixed, human-readable names** derived
+from `gatewayName` — the CloudWatch log groups `/${gatewayName}/gateway` and
+`/${gatewayName}/admin` (`lib/claude-gateway-stack.ts`), the ECR repo, the ECS
+cluster, the secrets. CloudFormation owns its resources **exclusively**: it will
+*create* a fixed-name resource but *refuses* to adopt one of the same name that
+already exists outside the stack. So any leftover from an earlier run — a deleted
+stack that left its log groups behind (log groups are not always torn down with
+the stack), or a prior EC2/EKS-era deploy (tell-tale: a stray
+`/claude-gateway/cloud-init` group) — blocks the new deploy. There is **no native
+CDK/CloudFormation "create if not exists"** flag; this is fundamental declarative
+behavior, not a repo gap.
+
+**Fix (preferred) — give this deploy a distinct `GATEWAY_NAME`.** Because every
+fixed name derives from `gatewayName`, changing the single `.env` value
+`GATEWAY_NAME` (threaded as `-c gatewayName`) shifts *all* of them at once — log
+groups, ECR repo, cluster, service, secrets — so a collision is structurally
+impossible and nothing is half-renamed. Verified live 2026-09-30: a re-deploy that
+had failed on `/claude-gateway/gateway` succeeded immediately after setting
+`GATEWAY_NAME=claude-gateway-558`. The gateway *hostname* is separate
+(`GATEWAY_HOSTNAME`), so the URL is unaffected. Confirm the new prefix is clean
+first (`aws logs describe-log-groups --log-group-name-prefix /<newname>`, plus ECR
+repo and ECS cluster of that name).
+
+**Fix (alternative) — delete the orphans.** `aws logs delete-log-group
+--log-group-name /claude-gateway/gateway` (and `/admin`), then re-run. This is
+**destructive** — it discards whatever log data those groups hold (a real prior
+run can leave ~10 MB of audit logs per group), so export anything you need first
+and hand the delete to the account owner. Only use this when you specifically want
+to keep the original name.
+
+**Do NOT** try to dodge it in code with `logs.LogGroup.fromLogGroupName(...)`: that
+returns an *imported, unmanaged* reference, so CDK stops setting the group's
+retention and stops deleting it on teardown — you trade a one-time orphan for a
+permanently mismanaged resource.
+
+**Sibling trap exposed by the rename — stale CodeBuild ECR policy.** Changing
+`GATEWAY_NAME` dodges the log-group collision but surfaces a second create-once bug
+in `deploy.sh`: the CodeBuild role (`claude-gateway-codebuild`) and its ECR push
+policy were created *inside* an `if project does not exist` guard, scoped to the
+**old** repo ARN. On a rename the project already exists, so the block is skipped
+and `docker push` to the new repo is `denied` (`ecr:InitiateLayerUpload ... no
+identity-based policy allows`). The role/project names are **hardcoded**, not
+derived from `GATEWAY_NAME`, so they get reused with a stale name-scoped policy.
+Fixed 2026-09-30: the `put-role-policy` now runs on **every** deploy (idempotent
+overwrite reconciling the ECR `Resource` ARN to `${REPO_NAME}`); only role/project
+*creation* stays guarded. Re-running `deploy.sh` self-heals the stale policy.
+
+**DB right-sizing is `.env`-driven (added 2026-10-01).** The DbStack RDS instance
+is now configurable via `DB_INSTANCE_TYPE` / `DB_MULTI_AZ` in `.env`, threaded by
+`deploy.sh` as `-c dbInstanceType` / `-c dbMultiAz` to the context keys
+`bin/app.ts` reads. Both are **optional** — unset falls through to the
+`lib/db-stack.ts` defaults (`db.t4g.micro`, Multi-AZ, 7-day backups, right for
+1–200 users). Only applies when the DbStack owns the DB (`DB_ENDPOINT` unset).
+`DB_INSTANCE_TYPE` must be a full RDS class (`db.t4g.small`), `DB_MULTI_AZ` is
+`true`/`false`. The context keys must match `app.ts` exactly or the override is
+silently ignored and the default applies.
+
+*Related:* §15 (ECR-repo collision when `build-admin-image.sh` runs before CDK owns
+the repo) is the same class of trap — a fixed-name resource created outside the
+stack's ownership.

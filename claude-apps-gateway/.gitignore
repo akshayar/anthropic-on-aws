@@ -11,3 +11,15 @@
 # Local-only telemetry test scratch — never shipped with the example.
 /local-test/
 /test-direct-otlp/
+
+# Account-specific deploy env files (real infra values + OIDC secret placeholder).
+# The tracked template is .env.example; ignore .env and any .env.<suffix>.
+/cdk/.env.558
+/cdk/.env.*
+!/cdk/.env.example
+
+# Customer-named / customer-specific docs must never be checked in to GitHub.
+# tata-aig-demo (and any named-customer folder) is kept local only; the preserved
+# off-git copies live under docs/_private-customer/.
+/docs/tata-aig-demo/
+/docs/_private-customer/
